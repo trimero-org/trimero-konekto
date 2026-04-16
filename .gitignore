@@ -1,0 +1,22 @@
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+secrets/
+
+# Rust
+/target
+Cargo.lock  #For libraries (not binaries)
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
