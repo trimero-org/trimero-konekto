@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/konekto-core",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "AGPL-3.0-only"
+repository = "https://github.com/trimero-G3/trimero-konekto"
+authors = ["Trimero Konekto team"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+# Allow a small set of pedantic lints that fight idiomatic style without
+# improving safety or readability for this project.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

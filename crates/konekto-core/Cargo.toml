@@ -1,0 +1,16 @@
+[package]
+name = "konekto-core"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Core domain logic and cryptographic types for Trimero Konekto."
+
+[lints]
+workspace = true
+
+[dependencies]
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+thiserror = "1.0"
