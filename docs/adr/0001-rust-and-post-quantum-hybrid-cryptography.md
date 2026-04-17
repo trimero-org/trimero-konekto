@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-04-16
-**Author:** Trimero Fonduso
+**Author:** Hadrien MORTIER
 
 ---
 

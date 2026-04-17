@@ -53,19 +53,26 @@ This is not a prototype. Every line of code you write is a foundation stone. Wri
 - `webauthn-rs` — FIDO2 / Passkeys / WebAuthn
 - `argon2` — password hashing (if passwords are ever used as fallback)
 
-### Identity Protocols
+### Identity Protocols (V1)
 - OAuth 2.1 + OpenID Connect
 - PKCE (mandatory on all flows)
 - Passkeys / FIDO2 as default authentication (no passwords by default)
-- DID W3C (prepared, not necessarily implemented in V1)
 
-### Application Stack
+> Deferred to V2+: DID (W3C) and Verifiable Credentials. Specs and the
+> EUDI Wallet / eIDAS 2.0 ecosystem are still stabilizing. Revisit when
+> mandated at EU level or when a concrete user flow requires them.
+
+### Application Stack (V1)
 - `axum` — HTTP framework
-- `tonic` — gRPC for inter-service communication
 - `tower` — middleware (rate limiting, auth, tracing)
 - `sqlx` — PostgreSQL, async, compile-time query validation
 - `tracing` + `opentelemetry` — structured logging and observability
 - `deadpool-postgres` — connection pooling
+
+> Deferred to V2+: `tonic` / gRPC. Inter-service communication is out of
+> scope for V1 — there is no second service to talk to yet. If V2
+> introduces one, a dedicated ADR will justify gRPC vs REST before
+> adding the dependency.
 
 ### Infrastructure
 - PostgreSQL — primary datastore
@@ -89,7 +96,7 @@ Root Identity (never exposed, never stored in plaintext)
 
 ### API Design
 - REST for external-facing endpoints (OpenAPI spec maintained)
-- gRPC for internal inter-service communication
+- V1 has a single service — no internal RPC layer. gRPC is deferred to V2+.
 - Every endpoint has: authentication, authorization, rate limiting, input validation, structured error response
 - No endpoint returns more data than the caller is authorized to receive
 
@@ -108,14 +115,12 @@ Root Identity (never exposed, never stored in plaintext)
 
 ---
 
-## Project Structure
+## Project Structure (V1 scope)
 trimero-konekto/
 ├── crates/
 │   ├── konekto-core/        # Domain logic, crypto, identity model
 │   ├── konekto-api/         # Axum HTTP server, OpenAPI spec
-│   ├── konekto-grpc/        # Tonic gRPC server
-│   ├── konekto-db/          # SQLx migrations, repository layer
-│   └── konekto-sdk/         # Client SDK (to be used by Trimero apps)
+│   └── konekto-db/          # SQLx migrations, repository layer
 ├── docs/
 │   ├── adr/                 # Architecture Decision Records
 │   └── threat-model.md      # Living threat model document
@@ -126,6 +131,10 @@ trimero-konekto/
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
 └── README.md
+
+V1 ships three crates only — `konekto-core`, `konekto-api`, `konekto-db`.
+`konekto-grpc` and `konekto-sdk` are deferred to V2+ to keep the initial
+attack surface, review burden, and API-stability commitments small.
 
 ---
 

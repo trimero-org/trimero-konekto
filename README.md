@@ -50,23 +50,38 @@ This isolation is cryptographic, not just logical.
 | Database | PostgreSQL | Mature, sovereign, zero vendor lock-in |
 | Hosting | OVHcloud / Scaleway | European jurisdiction only, contractually guaranteed |
 
+> Note on AES-256-GCM: "quantum-resistant at current key sizes" is a
+> shorthand for *post-quantum effective security ~128 bits* against
+> Grover's algorithm — not an absolute guarantee. See ADR-0001.
+
 ---
 
-## Project structure
+## Project structure (V1 scope)
 trimero-konekto/
 ├── crates/
 │   ├── konekto-core/     # Domain logic, crypto, identity model
 │   ├── konekto-api/      # Axum HTTP server, OpenAPI spec
-│   ├── konekto-grpc/     # Tonic gRPC inter-service
-│   ├── konekto-db/       # SQLx migrations, repository layer
-│   └── konekto-sdk/      # Client SDK for Trimero apps
+│   └── konekto-db/       # SQLx migrations, repository layer
 ├── docs/
 │   ├── adr/              # Architecture Decision Records
-│   └── threat-model.md   # Living threat model
+│   └── threat-model.md   # Living threat model (v0)
 ├── migrations/           # PostgreSQL migrations
 ├── tests/                # Integration tests
 └── .github/
 └── workflows/        # CI: clippy, rustfmt, tests, coverage
+
+V1 ships with three crates only — `konekto-core`, `konekto-api`, `konekto-db`.
+Everything else is deferred to keep the initial attack surface and review
+burden small.
+
+### Deferred to V2+
+
+| Item | Why not in V1 |
+|---|---|
+| `konekto-grpc` (Tonic inter-service) | No second service to talk to yet; REST between services is fine at this scale |
+| `konekto-sdk` (client SDK) | API must stabilize before freezing a client contract |
+| DID (W3C Decentralized Identifiers) | Specs still evolving; not required for OIDC/Passkey auth |
+| Verifiable Credentials (VC) | Ecosystem (EUDI Wallet, eIDAS 2.0) not production-ready; revisit when mandated |
 
 ---
 
@@ -95,7 +110,8 @@ The core will always be open, auditable, and forkable.
 > 🚧 Pre-alpha — foundational architecture in progress.
 
 This project is in its earliest stage. No production-ready code yet.
-Follow the [ADRs](docs/adr/) to understand the decisions being made.
+Follow the [ADRs](docs/adr/) and the [threat model v0](docs/threat-model.md)
+to understand the decisions being made and the risks being tracked.
 
 ---
 
