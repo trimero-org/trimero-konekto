@@ -23,8 +23,12 @@
 
 mod context;
 mod error;
+mod grant;
 mod key;
 
 pub use context::{Context, Laboro, Socio, Vivo};
 pub use error::Error;
+pub use grant::{
+    AuditId, AuditLog, AuditWriteError, CrossContextGrant, GrantError, GrantRecord, GrantScope,
+};
 pub use key::{ContextKey, RootKey, KEY_SIZE};
