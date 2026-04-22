@@ -14,4 +14,16 @@ pub enum Error {
     /// a deserialization or interop bug at the edge.
     #[error("invalid key material length")]
     InvalidKeyLength,
+
+    /// A wrapped-key blob did not parse: wrong length, unknown
+    /// version byte, or otherwise malformed layout.
+    #[error("invalid wrapped-key format")]
+    InvalidWrappedFormat,
+
+    /// AEAD authentication failed when unwrapping. Indicates a wrong
+    /// wrapping key, tampered ciphertext, or incorrect AAD binding.
+    /// MUST be treated as an unrecoverable security event by
+    /// callers (not a recoverable protocol error).
+    #[error("wrapped-key authentication failed")]
+    UnwrapAuthFailed,
 }

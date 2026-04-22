@@ -26,6 +26,18 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
     at the type level.
   - Supporting types: `AuditId`, `AuditWriteError`, `GrantScope`
     (`#[non_exhaustive]`), `GrantRecord`, `GrantError`.
+- `konekto-core`: AEAD wrapping of the root key (ADR-0004 §3–§4).
+  - `WrappingKey`: 256-bit opaque secret, move-only, zeroize-on-drop.
+    Accepts caller-supplied material from upstream KDFs (WebAuthn
+    PRF, Argon2id) or draws one from the CSPRNG.
+  - `WrappedRootKey`: fixed 61-byte wire format
+    (`version || nonce || ciphertext || tag`), serializable via
+    `as_bytes`/`from_bytes`. Version-tagged and AAD-bound so a
+    v1 blob can never be interpreted under a future variant.
+  - `RootKey::wrap` / `RootKey::unwrap`: AES-256-GCM with a
+    fresh 96-bit nonce per wrap and the fixed AAD
+    `konekto.rootkey.wrap.v1`.
+  - Errors: `Error::InvalidWrappedFormat`, `Error::UnwrapAuthFailed`.
 - Workspace-level lints: forbid `unsafe_code`; deny `clippy::all` and
   `clippy::pedantic`; warn on `missing_docs`.
 - CI workflow: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`.

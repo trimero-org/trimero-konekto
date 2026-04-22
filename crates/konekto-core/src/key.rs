@@ -88,12 +88,30 @@ impl RootKey {
         }
     }
 
+    /// Construct a `RootKey` from caller-owned material.
+    ///
+    /// Crate-internal: the only production call site is
+    /// [`crate::wrap`]'s unwrap path, where the bytes come from a
+    /// successful AEAD decryption. External callers obtain a
+    /// `RootKey` via [`RootKey::generate`] or [`RootKey::unwrap`].
+    pub(crate) fn from_material(material: [u8; KEY_SIZE]) -> Self {
+        Self { material }
+    }
+
+    /// Borrow the raw material for wrapping under an AEAD key.
+    ///
+    /// Crate-internal: called only by [`crate::wrap`] to feed the
+    /// AES-256-GCM sealing path. Callers MUST immediately consume
+    /// the slice (no copies, no logging).
+    pub(crate) fn material_for_wrap(&self) -> &[u8; KEY_SIZE] {
+        &self.material
+    }
+
     /// Test-only constructor with caller-supplied material.
     ///
     /// Only compiled under `cfg(test)`. Production `RootKey`
     /// instances are produced by [`RootKey::generate`] at enrollment
-    /// or by unwrapping a per-credential wrapped blob at login
-    /// (login flow not yet implemented).
+    /// or by unwrapping a per-credential wrapped blob at login.
     #[cfg(test)]
     pub(crate) fn from_bytes_for_test(material: [u8; KEY_SIZE]) -> Self {
         Self { material }
