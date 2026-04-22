@@ -14,3 +14,4 @@ workspace = true
 [dependencies]
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 thiserror = "1.0"
+aws-lc-rs = "1.10"

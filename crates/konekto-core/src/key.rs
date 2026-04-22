@@ -3,14 +3,14 @@
 //! See ADR-0002 (type-system encoding) and ADR-0004 (root-key
 //! lifecycle) for the full design.
 //!
-//! This module establishes the type skeleton: [`RootKey`] and
-//! [`ContextKey<C>`] are move-only, zeroized on drop, and expose no
-//! serialization or cloning. Cryptographic derivation
-//! (HKDF-SHA256 via `aws-lc-rs`) lands in a follow-up increment;
-//! this version intentionally does not expose a public
-//! `RootKey::derive` so that no accidental "fake crypto" slips
-//! through.
+//! [`RootKey`] and [`ContextKey<C>`] are move-only, zeroized on drop,
+//! and expose no serialization or cloning. Context keys are derived
+//! from the root via HKDF-SHA256 (FIPS-validated primitive from
+//! `aws-lc-rs`), with domain separation carried by each context's
+//! versioned [`Context::LABEL`] used as the HKDF `info` parameter.
 
+use aws_lc_rs::hkdf::{Salt, HKDF_SHA256};
+use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use core::marker::PhantomData;
 use zeroize::Zeroize;
 
@@ -40,11 +40,60 @@ pub struct RootKey {
 }
 
 impl RootKey {
+    /// Generate a fresh root key from the system CSPRNG.
+    ///
+    /// Per ADR-0004 §2, a user's root key is a 256-bit value drawn
+    /// from the operating-system CSPRNG at enrollment. This is the
+    /// single production entry point for minting new root keys.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the system CSPRNG is unavailable or returns an
+    /// error. This condition is unrecoverable (entropy exhaustion
+    /// or kernel malfunction) and must abort the enrollment flow.
+    #[must_use]
+    pub fn generate() -> Self {
+        let mut material = [0u8; KEY_SIZE];
+        SystemRandom::new()
+            .fill(&mut material)
+            .expect("system CSPRNG failed");
+        Self { material }
+    }
+
+    /// Derive a context-specific key via HKDF-SHA256.
+    ///
+    /// Domain separation is provided by the caller-selected context
+    /// `C`: the HKDF `info` parameter is [`Context::LABEL`], a
+    /// versioned, namespaced byte string unique to each context (see
+    /// [`crate::context`]). HKDF is run with an empty salt because
+    /// the input keying material is already a uniformly random
+    /// 256-bit secret drawn from the CSPRNG.
+    ///
+    /// The derivation is deterministic: calling `derive` twice on
+    /// the same [`RootKey`] with the same `C` produces byte-equal
+    /// key material. Different contexts — or different root keys —
+    /// produce cryptographically independent outputs.
+    #[must_use]
+    pub fn derive<C: Context>(&self) -> ContextKey<C> {
+        let prk = Salt::new(HKDF_SHA256, &[]).extract(&self.material);
+        let okm = prk
+            .expand(&[C::LABEL], HKDF_SHA256)
+            .expect("HKDF-SHA256 expand with 32-byte output cannot fail");
+        let mut material = [0u8; KEY_SIZE];
+        okm.fill(&mut material)
+            .expect("HKDF-SHA256 fill with 32-byte output cannot fail");
+        ContextKey {
+            material,
+            _context: PhantomData,
+        }
+    }
+
     /// Test-only constructor with caller-supplied material.
     ///
     /// Only compiled under `cfg(test)`. Production `RootKey`
-    /// instances are produced by enrollment and login flows (not yet
-    /// implemented in this increment).
+    /// instances are produced by [`RootKey::generate`] at enrollment
+    /// or by unwrapping a per-credential wrapped blob at login
+    /// (login flow not yet implemented).
     #[cfg(test)]
     pub(crate) fn from_bytes_for_test(material: [u8; KEY_SIZE]) -> Self {
         Self { material }
@@ -167,5 +216,53 @@ mod tests {
     #[test]
     fn key_size_matches_expected_constant() {
         assert_eq!(KEY_SIZE, 32);
+    }
+
+    #[test]
+    fn generate_produces_distinct_keys() {
+        // Two CSPRNG draws colliding on 256 bits has probability
+        // 2^-256; treat a collision as a test failure.
+        let a = RootKey::generate();
+        let b = RootKey::generate();
+        assert_ne!(a.material, b.material);
+    }
+
+    #[test]
+    fn derive_is_deterministic() {
+        let material = [0x42; KEY_SIZE];
+        let root_a = RootKey::from_bytes_for_test(material);
+        let root_b = RootKey::from_bytes_for_test(material);
+        let k_a = root_a.derive::<Vivo>();
+        let k_b = root_b.derive::<Vivo>();
+        assert_eq!(k_a.as_bytes(), k_b.as_bytes());
+    }
+
+    #[test]
+    fn derive_separates_contexts() {
+        let root = RootKey::from_bytes_for_test([0x11; KEY_SIZE]);
+        let v = root.derive::<Vivo>();
+        let l = root.derive::<Laboro>();
+        let s = root.derive::<Socio>();
+        assert_ne!(v.as_bytes(), l.as_bytes());
+        assert_ne!(l.as_bytes(), s.as_bytes());
+        assert_ne!(v.as_bytes(), s.as_bytes());
+    }
+
+    #[test]
+    fn derive_separates_roots() {
+        let root_a = RootKey::from_bytes_for_test([0x01; KEY_SIZE]);
+        let root_b = RootKey::from_bytes_for_test([0x02; KEY_SIZE]);
+        let k_a = root_a.derive::<Vivo>();
+        let k_b = root_b.derive::<Vivo>();
+        assert_ne!(k_a.as_bytes(), k_b.as_bytes());
+    }
+
+    #[test]
+    fn derived_key_does_not_equal_root_material() {
+        // Sanity: HKDF must transform the input, not pass it through.
+        let material = [0x77; KEY_SIZE];
+        let root = RootKey::from_bytes_for_test(material);
+        let k = root.derive::<Laboro>();
+        assert_ne!(k.as_bytes(), &material);
     }
 }

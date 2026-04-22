@@ -11,10 +11,13 @@
 //! - A [`RootKey`] type that exists only during bounded lifecycle
 //!   scopes (enrollment, login, multi-device binding, cross-context
 //!   operations) and is zeroized on drop.
+//! - Deterministic derivation of a [`ContextKey<C>`] from a
+//!   [`RootKey`] via HKDF-SHA256 (`aws-lc-rs`), with domain
+//!   separation provided by the versioned per-context label.
 //!
-//! This is the first increment: types and their invariants. Real
-//! cryptographic derivation (HKDF-SHA256 via `aws-lc-rs`) lands in a
-//! follow-up once the crypto stack is wired.
+//! Persistence (per-credential wrapping of the root key), enrollment
+//! orchestration, login, and cross-context grants are layered on top
+//! of these primitives in later crates and later increments.
 //!
 //! See the project's ADRs in `docs/adr/` for the full rationale.
 
