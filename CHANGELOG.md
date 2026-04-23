@@ -61,6 +61,23 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
     CHECK constraints enforcing the KDF/PRF wrap-kind invariant
     and a partial unique index limiting each identity to one
     recovery-passphrase wrap.
+- `konekto-core`: public CSPRNG helpers `fill_random` and
+  `random_bytes` so downstream crates that need entropy (salts,
+  nonces) do not pull `aws-lc-rs` directly.
+- `konekto-db`: dev-mode identity flow end-to-end.
+  - `IdentityStore` trait bundling identity, credential,
+    wrapped-root, and audit-event storage.
+  - `InMemoryStore` implementing `IdentityStore` and
+    `konekto_core::AuditLog` in a single process-local backend.
+  - `enroll_dev_password`: generates a `RootKey`, derives a
+    `WrappingKey` from `Argon2id(passphrase, salt)`, wraps and
+    persists the root, records an `Enrollment` audit event,
+    returns the new identity id.
+  - `login_dev_password::<C>`: loads the wrap, re-derives the
+    wrapping key, unwraps the root (AEAD-authenticated — wrong
+    passphrase surfaces as `LoginError::BadPassphrase`), derives
+    and returns the `ContextKey<C>`, records a `Login` event.
+  - `EnrollmentOutcome`, `EnrollmentError`, `LoginError`.
 - Workspace-level lints: forbid `unsafe_code`; deny `clippy::all` and
   `clippy::pedantic`; warn on `missing_docs`.
 - CI workflow: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`.

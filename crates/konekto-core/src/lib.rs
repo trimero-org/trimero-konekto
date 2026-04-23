@@ -26,6 +26,7 @@ mod error;
 mod grant;
 mod kdf;
 mod key;
+mod random;
 mod wrap;
 
 pub use context::{Context, Laboro, Socio, Vivo};
@@ -35,4 +36,5 @@ pub use grant::{
 };
 pub use kdf::{PassphraseParams, MIN_PASSPHRASE_LEN, MIN_SALT_LEN};
 pub use key::{ContextKey, RootKey, KEY_SIZE};
+pub use random::{fill_random, random_bytes};
 pub use wrap::{WrappedRootKey, WrappingKey};

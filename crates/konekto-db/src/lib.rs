@@ -27,6 +27,7 @@
 //! or carry a versioned migration.
 
 pub mod audit;
+pub mod identity;
 pub mod records;
 
 mod error;
