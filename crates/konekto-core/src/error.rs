@@ -26,4 +26,14 @@ pub enum Error {
     /// callers (not a recoverable protocol error).
     #[error("wrapped-key authentication failed")]
     UnwrapAuthFailed,
+
+    /// A KDF parameter was out of the accepted range, or the salt /
+    /// input length failed the KDF's validation at the boundary.
+    #[error("invalid KDF parameters or input")]
+    InvalidKdfInput,
+
+    /// The KDF implementation returned an error during derivation
+    /// (allocation failure or similar environment-level condition).
+    #[error("KDF derivation failed")]
+    KdfFailed,
 }

@@ -38,6 +38,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
     fresh 96-bit nonce per wrap and the fixed AAD
     `konekto.rootkey.wrap.v1`.
   - Errors: `Error::InvalidWrappedFormat`, `Error::UnwrapAuthFailed`.
+- `konekto-core`: Argon2id passphrase KDF (ADR-0004 §4).
+  - `PassphraseParams` with `::DEFAULT` at OWASP 2024 minimums
+    (19 MiB / 2 iters / p=1) and `::new` validating against
+    Argon2's accepted ranges.
+  - `PassphraseParams::derive_wrapping_key` produces a
+    `WrappingKey` from a caller-supplied passphrase and salt.
+    Enforces `MIN_PASSPHRASE_LEN = 8` and `MIN_SALT_LEN = 16` at
+    the boundary.
+  - Errors: `Error::InvalidKdfInput`, `Error::KdfFailed`.
 - Workspace-level lints: forbid `unsafe_code`; deny `clippy::all` and
   `clippy::pedantic`; warn on `missing_docs`.
 - CI workflow: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`.

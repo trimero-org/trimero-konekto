@@ -24,6 +24,7 @@
 mod context;
 mod error;
 mod grant;
+mod kdf;
 mod key;
 mod wrap;
 
@@ -32,5 +33,6 @@ pub use error::Error;
 pub use grant::{
     AuditId, AuditLog, AuditWriteError, CrossContextGrant, GrantError, GrantRecord, GrantScope,
 };
+pub use kdf::{PassphraseParams, MIN_PASSPHRASE_LEN, MIN_SALT_LEN};
 pub use key::{ContextKey, RootKey, KEY_SIZE};
 pub use wrap::{WrappedRootKey, WrappingKey};
