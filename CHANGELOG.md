@@ -6,7 +6,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [Unreleased]
 
 ### Added
-- Cargo workspace layout with `konekto-core` as the first crate.
+- Cargo workspace layout with `konekto-core` and `konekto-db` crates.
 - `konekto-core`: type-system skeleton for context isolation (ADR-0002).
   - Sealed `Context` trait with `Vivo`, `Laboro`, `Socio` zero-sized markers.
   - `RootKey` and `ContextKey<C>` types with zeroize-on-drop semantics,
@@ -47,6 +47,20 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
     Enforces `MIN_PASSPHRASE_LEN = 8` and `MIN_SALT_LEN = 16` at
     the boundary.
   - Errors: `Error::InvalidKdfInput`, `Error::KdfFailed`.
+- `konekto-db`: persistence layer scaffolding.
+  - Record types: `IdentityRecord`, `CredentialRecord`,
+    `WrappedRootRecord` (with `WrapKind` enum +
+    `KdfParamsRecord`), `AuditRecord` (with `AuditEventKind`).
+  - `InMemoryAuditLog`: a process-local implementation of
+    `konekto_core::AuditLog` suitable for tests and dev-mode
+    deployments.
+  - `DbError`: `NotFound`, `Conflict`, `StorageWriteFailed`,
+    `StorageReadFailed`.
+  - Initial Postgres schema (`migrations/0001_initial.sql`):
+    identities, credentials, wrapped_roots, audit_log, with
+    CHECK constraints enforcing the KDF/PRF wrap-kind invariant
+    and a partial unique index limiting each identity to one
+    recovery-passphrase wrap.
 - Workspace-level lints: forbid `unsafe_code`; deny `clippy::all` and
   `clippy::pedantic`; warn on `missing_docs`.
 - CI workflow: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`.

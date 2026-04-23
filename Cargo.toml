@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/konekto-core",
+    "crates/konekto-db",
 ]
 
 [workspace.package]
