@@ -105,6 +105,34 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - Workspace-level lints: forbid `unsafe_code`; deny `clippy::all` and
   `clippy::pedantic`; warn on `missing_docs`.
 - CI workflow: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`.
+- `konekto-api`: HTTP surface for the dev-mode identity flow
+  (axum 0.8).
+  - `POST /dev/enroll` — provision a new identity from a passphrase,
+    returns `{"identity_id": "<uuid>"}`.
+  - `POST /dev/login` — authenticate and derive a `ContextKey<C>` for
+    a requested context (`"vivo"` | `"laboro"` | `"socio"`). Runtime
+    selector dispatches to the compile-time `login_dev_password::<C, _>`
+    so ADR-0002 context isolation applies end-to-end. Response does
+    NOT carry the key material.
+  - `ApiStore` capability trait: blanket `IdentityStore + AuditLog +
+    Clone + Send + Sync + 'static`. Router is generic over it so
+    tests wire up an `Arc<tokio::sync::Mutex<InMemoryStore>>`
+    adapter and production wires up `PgIdentityStore`.
+  - `AppState<S>` generic app state plus configurable
+    `PassphraseParams` (tests use cheap Argon2id params; production
+    bootstrap uses `PassphraseParams::DEFAULT`).
+  - Opaque error surface (ADR-0003): every internal error funnels
+    through `ApiError` with stable snake-case codes
+    (`invalid_request`, `unauthorized`, `internal_error`). Unknown
+    identity and wrong passphrase collapse to the same 401 response
+    to avoid an identity-enumeration oracle.
+  - Binary: tracing-subscriber + sqlx `PgPool` + embedded migrations
+    via `PgIdentityStore::migrate`, `BIND_ADDR` / `DATABASE_URL` /
+    `RUST_LOG` env config, graceful shutdown on Ctrl-C / SIGTERM.
+  - Five end-to-end tests via `tower::ServiceExt::oneshot`:
+    enroll→login happy path, per-context login dispatch, wrong
+    passphrase 401, unknown identity 401 (oracle check), short
+    passphrase 400.
 
 ### Changed
 - `konekto-db`: `audit_log.id` column changed from `NUMERIC(39,0)` to

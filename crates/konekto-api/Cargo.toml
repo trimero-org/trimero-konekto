@@ -1,0 +1,48 @@
+[package]
+name = "konekto-api"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "HTTP API for Trimero Konekto: dev-mode enrollment and login over axum."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "konekto-api"
+path = "src/main.rs"
+
+[dependencies]
+konekto-core = { path = "../konekto-core" }
+konekto-db = { path = "../konekto-db", features = ["postgres"] }
+
+axum = { version = "0.8", default-features = false, features = [
+    "http1",
+    "json",
+    "tokio",
+    "tower-log",
+] }
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "signal", "net", "sync"] }
+tower = { version = "0.5", default-features = false }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+async-trait = "0.1"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+uuid = { version = "1.10", features = ["v4", "serde"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "postgres",
+] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+bytes = "1"
