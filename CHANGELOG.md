@@ -78,6 +78,36 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
     passphrase surfaces as `LoginError::BadPassphrase`), derives
     and returns the `ContextKey<C>`, records a `Login` event.
   - `EnrollmentOutcome`, `EnrollmentError`, `LoginError`.
+- `konekto-db`: Postgres-backed `IdentityStore` and `AuditLog`
+  (`postgres` cargo feature, new `pg` module).
+  - `PgIdentityStore`: wraps a `sqlx::PgPool`, implements both
+    `IdentityStore` and `konekto_core::AuditLog` against the same
+    pool. `Clone` is cheap (pool is internally `Arc`-shared), so
+    handlers clone the store per-request to satisfy the `&mut self`
+    trait contract.
+  - Embedded migrations via `sqlx::migrate!("./migrations")`, applied
+    idempotently by `PgIdentityStore::migrate`.
+  - Enum-typed columns (`status`, `wrap_kind`, `kind`, `grant_scope`)
+    persist as canonical lower-snake-case text; `kdf_params` as JSONB;
+    `konekto_core::AuditId` as 16-byte big-endian `BYTEA` so numeric
+    order matches lexicographic byte order.
+- Integration tests against a live Postgres container via
+  `testcontainers-modules`. Nine `#[ignore]`-gated tests cover
+  migration idempotency, enroll→login round-trip, wrong-passphrase
+  rejection, per-context key distinctness, identity + wrapped-root
+  field preservation, audit-event persistence, cross-context grant
+  writes, and unique-violation conflict mapping.
+- `konekto-core`: `AuditLog` trait is now async via `async-trait`.
+  `record_grant` and the default `issue` method return futures so
+  real backends can do I/O. `InMemoryAuditLog` and `InMemoryStore`
+  migrated accordingly; callers of `enroll_dev_password` and
+  `login_dev_password` now `.await` them.
 - Workspace-level lints: forbid `unsafe_code`; deny `clippy::all` and
   `clippy::pedantic`; warn on `missing_docs`.
 - CI workflow: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`.
+
+### Changed
+- `konekto-db`: `audit_log.id` column changed from `NUMERIC(39,0)` to
+  `BYTEA CHECK (octet_length = 16)` (pre-alpha, safe to edit migration
+  0001). Avoids a `bigdecimal` dependency in the Postgres driver and
+  makes `u128 ↔ DB` round-trip trivial via `to_be_bytes`.

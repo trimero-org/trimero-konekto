@@ -74,15 +74,17 @@ CREATE UNIQUE INDEX wrapped_roots_one_recovery_per_identity
 
 -- Audit log.
 --
--- `id` is a NUMERIC(39) holding a u128 so every record has the
--- same identifier on the Rust side (`konekto_core::AuditId`) as
--- in the database. The natural ordering of the column matches
--- the monotonic-id contract of `AuditLog::record_grant`.
+-- `id` is a 16-byte BYTEA holding a u128 in big-endian form so
+-- every record has the same identifier on the Rust side
+-- (`konekto_core::AuditId`) as in the database. Big-endian
+-- encoding preserves numeric order under BYTEA's lexicographic
+-- comparator, so ORDER BY id is a monotonic sort.
+-- A CHECK constraint enforces the 16-byte width.
 --
 -- `payload` is JSONB so the serialization format of individual
 -- event kinds can evolve without a migration.
 CREATE TABLE audit_log (
-    id              NUMERIC(39, 0) PRIMARY KEY CHECK (id >= 0),
+    id              BYTEA PRIMARY KEY CHECK (octet_length(id) = 16),
     identity_id     UUID REFERENCES identities(id) ON DELETE SET NULL,
     kind            TEXT NOT NULL CHECK (kind IN (
         'cross_context_grant',

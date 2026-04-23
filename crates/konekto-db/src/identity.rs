@@ -45,32 +45,38 @@ use crate::records::{
 /// multiple backends (Postgres tables, a KMS, a dedicated audit
 /// store); the dev-mode flow treats them as one unit for
 /// testability.
-pub trait IdentityStore {
+///
+/// The trait is async: real backends (Postgres via sqlx) do I/O,
+/// and the HTTP layer the enrollment and login flows plug into is
+/// async end-to-end. In-memory implementations satisfy the trait
+/// with trivially-ready futures.
+#[async_trait::async_trait]
+pub trait IdentityStore: Send {
     /// Insert a new identity. Fails with [`DbError::Conflict`] if an
     /// identity with the same id already exists.
-    fn create_identity(&mut self, record: &IdentityRecord) -> Result<(), DbError>;
+    async fn create_identity(&mut self, record: &IdentityRecord) -> Result<(), DbError>;
 
     /// Load an identity by id.
-    fn get_identity(&self, id: Uuid) -> Result<IdentityRecord, DbError>;
+    async fn get_identity(&self, id: Uuid) -> Result<IdentityRecord, DbError>;
 
     /// Insert a new credential for an identity.
-    fn save_credential(&mut self, record: &CredentialRecord) -> Result<(), DbError>;
+    async fn save_credential(&mut self, record: &CredentialRecord) -> Result<(), DbError>;
 
     /// Insert a wrapped root-key record.
-    fn save_wrapped_root(&mut self, record: &WrappedRootRecord) -> Result<(), DbError>;
+    async fn save_wrapped_root(&mut self, record: &WrappedRootRecord) -> Result<(), DbError>;
 
     /// Find the first wrapped-root record for `identity_id` matching
     /// `wrap_kind`. The dev-password and recovery-passphrase paths
     /// have at most one row per identity (enforced by the schema),
     /// so a single-result lookup is sufficient.
-    fn find_wrapped_root(
+    async fn find_wrapped_root(
         &self,
         identity_id: Uuid,
         wrap_kind: WrapKind,
     ) -> Result<WrappedRootRecord, DbError>;
 
     /// Append an audit event.
-    fn record_audit_event(&mut self, record: &AuditRecord) -> Result<(), DbError>;
+    async fn record_audit_event(&mut self, record: &AuditRecord) -> Result<(), DbError>;
 }
 
 /// Process-local store combining identities, credentials, wrapped
@@ -116,8 +122,9 @@ impl InMemoryStore {
     }
 }
 
+#[async_trait::async_trait]
 impl IdentityStore for InMemoryStore {
-    fn create_identity(&mut self, record: &IdentityRecord) -> Result<(), DbError> {
+    async fn create_identity(&mut self, record: &IdentityRecord) -> Result<(), DbError> {
         if self.identities.contains_key(&record.id) {
             return Err(DbError::Conflict);
         }
@@ -125,11 +132,11 @@ impl IdentityStore for InMemoryStore {
         Ok(())
     }
 
-    fn get_identity(&self, id: Uuid) -> Result<IdentityRecord, DbError> {
+    async fn get_identity(&self, id: Uuid) -> Result<IdentityRecord, DbError> {
         self.identities.get(&id).cloned().ok_or(DbError::NotFound)
     }
 
-    fn save_credential(&mut self, record: &CredentialRecord) -> Result<(), DbError> {
+    async fn save_credential(&mut self, record: &CredentialRecord) -> Result<(), DbError> {
         if self.credentials.contains_key(&record.id) {
             return Err(DbError::Conflict);
         }
@@ -144,12 +151,12 @@ impl IdentityStore for InMemoryStore {
         Ok(())
     }
 
-    fn save_wrapped_root(&mut self, record: &WrappedRootRecord) -> Result<(), DbError> {
+    async fn save_wrapped_root(&mut self, record: &WrappedRootRecord) -> Result<(), DbError> {
         self.wrapped_roots.push(record.clone());
         Ok(())
     }
 
-    fn find_wrapped_root(
+    async fn find_wrapped_root(
         &self,
         identity_id: Uuid,
         wrap_kind: WrapKind,
@@ -161,14 +168,15 @@ impl IdentityStore for InMemoryStore {
             .ok_or(DbError::NotFound)
     }
 
-    fn record_audit_event(&mut self, record: &AuditRecord) -> Result<(), DbError> {
+    async fn record_audit_event(&mut self, record: &AuditRecord) -> Result<(), DbError> {
         self.audit_events.push(record.clone());
         Ok(())
     }
 }
 
+#[async_trait::async_trait]
 impl AuditLog for InMemoryStore {
-    fn record_grant(&mut self, record: &GrantRecord) -> Result<AuditId, AuditWriteError> {
+    async fn record_grant(&mut self, record: &GrantRecord) -> Result<AuditId, AuditWriteError> {
         let id = AuditId::from_u128(self.next_id());
         self.grant_records.push((id, record.clone()));
         Ok(id)
@@ -234,7 +242,7 @@ pub struct EnrollmentOutcome {
 /// The [`RootKey`] is dropped (zeroized) before the function
 /// returns. Callers get an identity id; they then call
 /// [`login_dev_password`] to establish a context-bound session.
-pub fn enroll_dev_password<S>(
+pub async fn enroll_dev_password<S>(
     passphrase: &[u8],
     params: PassphraseParams,
     store: &mut S,
@@ -251,37 +259,43 @@ where
     let now = OffsetDateTime::now_utc();
     let identity_id = Uuid::new_v4();
 
-    store.create_identity(&IdentityRecord {
-        id: identity_id,
-        status: IdentityStatus::Active,
-        created_at: now,
-        updated_at: now,
-    })?;
+    store
+        .create_identity(&IdentityRecord {
+            id: identity_id,
+            status: IdentityStatus::Active,
+            created_at: now,
+            updated_at: now,
+        })
+        .await?;
 
-    store.save_wrapped_root(&WrappedRootRecord {
-        id: Uuid::new_v4(),
-        identity_id,
-        credential_id: None,
-        wrap_kind: WrapKind::DevPassword,
-        salt: Some(salt),
-        kdf_params: Some(KdfParamsRecord {
-            memory_kib: params.memory_kib(),
-            iterations: params.iterations(),
-            parallelism: params.parallelism(),
-        }),
-        wrapped_blob: wrapped.as_bytes().to_vec(),
-        created_at: now,
-    })?;
+    store
+        .save_wrapped_root(&WrappedRootRecord {
+            id: Uuid::new_v4(),
+            identity_id,
+            credential_id: None,
+            wrap_kind: WrapKind::DevPassword,
+            salt: Some(salt),
+            kdf_params: Some(KdfParamsRecord {
+                memory_kib: params.memory_kib(),
+                iterations: params.iterations(),
+                parallelism: params.parallelism(),
+            }),
+            wrapped_blob: wrapped.as_bytes().to_vec(),
+            created_at: now,
+        })
+        .await?;
 
     let audit_id = Uuid::new_v4().as_u128();
-    store.record_audit_event(&AuditRecord {
-        id: audit_id,
-        identity_id: Some(identity_id),
-        kind: AuditEventKind::Enrollment,
-        grant_scope: None,
-        payload: b"{\"flow\":\"dev_password\"}".to_vec(),
-        recorded_at: now,
-    })?;
+    store
+        .record_audit_event(&AuditRecord {
+            id: audit_id,
+            identity_id: Some(identity_id),
+            kind: AuditEventKind::Enrollment,
+            grant_scope: None,
+            payload: b"{\"flow\":\"dev_password\"}".to_vec(),
+            recorded_at: now,
+        })
+        .await?;
 
     Ok(EnrollmentOutcome { identity_id })
 }
@@ -299,7 +313,7 @@ where
 ///   surfaces as [`LoginError::BadPassphrase`]).
 /// - Derives the context key for `C` and drops the root.
 /// - Records an [`AuditEventKind::Login`] event.
-pub fn login_dev_password<C, S>(
+pub async fn login_dev_password<C, S>(
     identity_id: Uuid,
     passphrase: &[u8],
     store: &mut S,
@@ -308,7 +322,10 @@ where
     C: Context,
     S: IdentityStore,
 {
-    let wrap_record = match store.find_wrapped_root(identity_id, WrapKind::DevPassword) {
+    let wrap_record = match store
+        .find_wrapped_root(identity_id, WrapKind::DevPassword)
+        .await
+    {
         Ok(r) => r,
         Err(DbError::NotFound) => return Err(LoginError::NotFound),
         Err(e) => return Err(e.into()),
@@ -341,14 +358,16 @@ where
 
     let now = OffsetDateTime::now_utc();
     let audit_id = Uuid::new_v4().as_u128();
-    store.record_audit_event(&AuditRecord {
-        id: audit_id,
-        identity_id: Some(identity_id),
-        kind: AuditEventKind::Login,
-        grant_scope: None,
-        payload: b"{\"flow\":\"dev_password\"}".to_vec(),
-        recorded_at: now,
-    })?;
+    store
+        .record_audit_event(&AuditRecord {
+            id: audit_id,
+            identity_id: Some(identity_id),
+            kind: AuditEventKind::Login,
+            grant_scope: None,
+            payload: b"{\"flow\":\"dev_password\"}".to_vec(),
+            recorded_at: now,
+        })
+        .await?;
 
     Ok(context_key)
 }
@@ -366,52 +385,64 @@ mod tests {
         PassphraseParams::new(8, 1, 1).expect("fast argon2 params")
     }
 
-    #[test]
-    fn enroll_then_login_yields_identical_context_keys() {
+    #[tokio::test]
+    async fn enroll_then_login_yields_identical_context_keys() {
         let mut store = InMemoryStore::new();
         let passphrase = b"correct-horse-battery-staple";
         let params = fast_params();
 
-        let outcome = enroll_dev_password(passphrase, params, &mut store).expect("enroll");
+        let outcome = enroll_dev_password(passphrase, params, &mut store)
+            .await
+            .expect("enroll");
 
         let k1 = login_dev_password::<Vivo, _>(outcome.identity_id, passphrase, &mut store)
+            .await
             .expect("login 1");
         let k2 = login_dev_password::<Vivo, _>(outcome.identity_id, passphrase, &mut store)
+            .await
             .expect("login 2");
         assert_eq!(k1.as_bytes(), k2.as_bytes());
     }
 
-    #[test]
-    fn login_with_wrong_passphrase_fails_with_bad_passphrase() {
+    #[tokio::test]
+    async fn login_with_wrong_passphrase_fails_with_bad_passphrase() {
         let mut store = InMemoryStore::new();
         let params = fast_params();
-        let outcome =
-            enroll_dev_password(b"correct-passphrase", params, &mut store).expect("enroll");
+        let outcome = enroll_dev_password(b"correct-passphrase", params, &mut store)
+            .await
+            .expect("enroll");
 
         let res =
-            login_dev_password::<Vivo, _>(outcome.identity_id, b"incorrect-passphrase", &mut store);
+            login_dev_password::<Vivo, _>(outcome.identity_id, b"incorrect-passphrase", &mut store)
+                .await;
         assert!(matches!(res, Err(LoginError::BadPassphrase)));
     }
 
-    #[test]
-    fn login_for_unknown_identity_fails_with_not_found() {
+    #[tokio::test]
+    async fn login_for_unknown_identity_fails_with_not_found() {
         let mut store = InMemoryStore::new();
-        let res = login_dev_password::<Vivo, _>(uuid::Uuid::new_v4(), b"anything12", &mut store);
+        let res =
+            login_dev_password::<Vivo, _>(uuid::Uuid::new_v4(), b"anything12", &mut store).await;
         assert!(matches!(res, Err(LoginError::NotFound)));
     }
 
-    #[test]
-    fn login_derives_distinct_context_keys_per_context() {
+    #[tokio::test]
+    async fn login_derives_distinct_context_keys_per_context() {
         let mut store = InMemoryStore::new();
         let passphrase = b"passphrase-context-isolation";
         let params = fast_params();
-        let outcome = enroll_dev_password(passphrase, params, &mut store).expect("enroll");
+        let outcome = enroll_dev_password(passphrase, params, &mut store)
+            .await
+            .expect("enroll");
 
         let kv = login_dev_password::<Vivo, _>(outcome.identity_id, passphrase, &mut store)
+            .await
             .expect("vivo");
         let kl = login_dev_password::<Laboro, _>(outcome.identity_id, passphrase, &mut store)
+            .await
             .expect("laboro");
         let ks = login_dev_password::<Socio, _>(outcome.identity_id, passphrase, &mut store)
+            .await
             .expect("socio");
 
         assert_ne!(kv.as_bytes(), kl.as_bytes());
@@ -419,51 +450,61 @@ mod tests {
         assert_ne!(kv.as_bytes(), ks.as_bytes());
     }
 
-    #[test]
-    fn two_enrollments_produce_independent_identities_and_keys() {
+    #[tokio::test]
+    async fn two_enrollments_produce_independent_identities_and_keys() {
         let mut store = InMemoryStore::new();
         let params = fast_params();
 
-        let a = enroll_dev_password(b"passphrase-alpha", params, &mut store).expect("enroll a");
-        let b = enroll_dev_password(b"passphrase-bravo", params, &mut store).expect("enroll b");
+        let a = enroll_dev_password(b"passphrase-alpha", params, &mut store)
+            .await
+            .expect("enroll a");
+        let b = enroll_dev_password(b"passphrase-bravo", params, &mut store)
+            .await
+            .expect("enroll b");
         assert_ne!(a.identity_id, b.identity_id);
 
         let ka = login_dev_password::<Vivo, _>(a.identity_id, b"passphrase-alpha", &mut store)
+            .await
             .expect("login a");
         let kb = login_dev_password::<Vivo, _>(b.identity_id, b"passphrase-bravo", &mut store)
+            .await
             .expect("login b");
         assert_ne!(ka.as_bytes(), kb.as_bytes());
     }
 
-    #[test]
-    fn enroll_rejects_short_passphrase_via_kdf_boundary() {
+    #[tokio::test]
+    async fn enroll_rejects_short_passphrase_via_kdf_boundary() {
         let mut store = InMemoryStore::new();
         let params = fast_params();
-        let res = enroll_dev_password(b"short", params, &mut store);
+        let res = enroll_dev_password(b"short", params, &mut store).await;
         assert!(matches!(res, Err(EnrollmentError::Crypto(_))));
         // Must not leave partial state behind.
         assert!(store.wrapped_roots().is_empty());
     }
 
-    #[test]
-    fn enroll_writes_audit_event_of_expected_kind() {
+    #[tokio::test]
+    async fn enroll_writes_audit_event_of_expected_kind() {
         let mut store = InMemoryStore::new();
         let params = fast_params();
-        let outcome =
-            enroll_dev_password(b"correct-horse-battery", params, &mut store).expect("enroll");
+        let outcome = enroll_dev_password(b"correct-horse-battery", params, &mut store)
+            .await
+            .expect("enroll");
         let events = store.audit_events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, AuditEventKind::Enrollment);
         assert_eq!(events[0].identity_id, Some(outcome.identity_id));
     }
 
-    #[test]
-    fn login_writes_audit_event_of_expected_kind() {
+    #[tokio::test]
+    async fn login_writes_audit_event_of_expected_kind() {
         let mut store = InMemoryStore::new();
         let params = fast_params();
         let passphrase = b"correct-horse-battery";
-        let outcome = enroll_dev_password(passphrase, params, &mut store).expect("enroll");
+        let outcome = enroll_dev_password(passphrase, params, &mut store)
+            .await
+            .expect("enroll");
         let _k = login_dev_password::<Vivo, _>(outcome.identity_id, passphrase, &mut store)
+            .await
             .expect("login");
 
         let events = store.audit_events();
@@ -472,12 +513,13 @@ mod tests {
         assert_eq!(events[1].identity_id, Some(outcome.identity_id));
     }
 
-    #[test]
-    fn wrapped_root_record_carries_dev_password_kind_and_salt() {
+    #[tokio::test]
+    async fn wrapped_root_record_carries_dev_password_kind_and_salt() {
         let mut store = InMemoryStore::new();
         let params = fast_params();
-        let outcome =
-            enroll_dev_password(b"correct-horse-battery", params, &mut store).expect("enroll");
+        let outcome = enroll_dev_password(b"correct-horse-battery", params, &mut store)
+            .await
+            .expect("enroll");
 
         let roots = store.wrapped_roots();
         assert_eq!(roots.len(), 1);

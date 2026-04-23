@@ -178,7 +178,14 @@ pub struct GrantRecord {
 /// [`CrossContextGrant`]: concrete implementors only provide the
 /// storage hook [`AuditLog::record_grant`] and inherit correct grant
 /// construction from this crate.
-pub trait AuditLog {
+///
+/// The trait is async because real implementations (Postgres,
+/// remote KMS) do I/O. The `async_trait` macro boxes the returned
+/// futures and adds `Send` bounds so this trait composes with
+/// async runtimes such as `tokio` and HTTP frameworks such as
+/// `axum`.
+#[async_trait::async_trait]
+pub trait AuditLog: Send {
     /// Persist the audit record and return its identifier.
     ///
     /// Implementations MUST ensure the record is durable before
@@ -190,7 +197,7 @@ pub trait AuditLog {
     /// Returns an implementation-defined error if the audit record
     /// could not be durably persisted. The default [`Self::issue`]
     /// method maps any such error to [`GrantError::AuditFailed`].
-    fn record_grant(&mut self, record: &GrantRecord) -> Result<AuditId, AuditWriteError>;
+    async fn record_grant(&mut self, record: &GrantRecord) -> Result<AuditId, AuditWriteError>;
 
     /// Issue a cross-context grant.
     ///
@@ -207,7 +214,7 @@ pub trait AuditLog {
     /// - [`GrantError::InvalidTtl`] if `ttl` is zero.
     /// - [`GrantError::AuditFailed`] if [`Self::record_grant`]
     ///   failed. The grant is not constructed in this case.
-    fn issue<From: Context, To: Context>(
+    async fn issue<From: Context, To: Context>(
         &mut self,
         scope: GrantScope,
         ttl: Duration,
@@ -226,6 +233,7 @@ pub trait AuditLog {
         };
         let audit_id = self
             .record_grant(&record)
+            .await
             .map_err(|_| GrantError::AuditFailed)?;
         Ok(CrossContextGrant {
             audit_id,
@@ -262,8 +270,9 @@ mod tests {
         records: Vec<(AuditId, GrantRecord)>,
     }
 
+    #[async_trait::async_trait]
     impl AuditLog for InMemoryAudit {
-        fn record_grant(&mut self, record: &GrantRecord) -> Result<AuditId, AuditWriteError> {
+        async fn record_grant(&mut self, record: &GrantRecord) -> Result<AuditId, AuditWriteError> {
             self.next_id += 1;
             let id = AuditId::from_u128(self.next_id);
             self.records.push((id, record.clone()));
@@ -274,17 +283,22 @@ mod tests {
     /// Audit log that always fails.
     struct FailingAudit;
 
+    #[async_trait::async_trait]
     impl AuditLog for FailingAudit {
-        fn record_grant(&mut self, _record: &GrantRecord) -> Result<AuditId, AuditWriteError> {
+        async fn record_grant(
+            &mut self,
+            _record: &GrantRecord,
+        ) -> Result<AuditId, AuditWriteError> {
             Err(AuditWriteError)
         }
     }
 
-    #[test]
-    fn issue_writes_audit_record_and_returns_grant() {
+    #[tokio::test]
+    async fn issue_writes_audit_record_and_returns_grant() {
         let mut log = InMemoryAudit::default();
         let grant: CrossContextGrant<Vivo, Laboro> = log
             .issue::<Vivo, Laboro>(GrantScope::Reserved, Duration::from_secs(60))
+            .await
             .expect("grant issuance");
 
         assert_eq!(log.records.len(), 1);
@@ -296,12 +310,13 @@ mod tests {
         assert_eq!(grant.scope(), GrantScope::Reserved);
     }
 
-    #[test]
-    fn issue_carries_ttl_into_expiry() {
+    #[tokio::test]
+    async fn issue_carries_ttl_into_expiry() {
         let mut log = InMemoryAudit::default();
         let ttl = Duration::from_secs(300);
         let grant: CrossContextGrant<Vivo, Socio> = log
             .issue::<Vivo, Socio>(GrantScope::Reserved, ttl)
+            .await
             .expect("grant issuance");
 
         let elapsed = grant
@@ -311,29 +326,32 @@ mod tests {
         assert_eq!(elapsed, ttl);
     }
 
-    #[test]
-    fn issue_rejects_zero_ttl() {
+    #[tokio::test]
+    async fn issue_rejects_zero_ttl() {
         let mut log = InMemoryAudit::default();
-        let res: Result<CrossContextGrant<Laboro, Vivo>, _> =
-            log.issue::<Laboro, Vivo>(GrantScope::Reserved, Duration::from_secs(0));
+        let res: Result<CrossContextGrant<Laboro, Vivo>, _> = log
+            .issue::<Laboro, Vivo>(GrantScope::Reserved, Duration::from_secs(0))
+            .await;
         assert!(matches!(res, Err(GrantError::InvalidTtl)));
         assert!(log.records.is_empty(), "no audit record on invalid TTL");
     }
 
-    #[test]
-    fn issue_propagates_audit_failure_without_constructing_grant() {
+    #[tokio::test]
+    async fn issue_propagates_audit_failure_without_constructing_grant() {
         let mut log = FailingAudit;
-        let res: Result<CrossContextGrant<Vivo, Laboro>, _> =
-            log.issue::<Vivo, Laboro>(GrantScope::Reserved, Duration::from_secs(60));
+        let res: Result<CrossContextGrant<Vivo, Laboro>, _> = log
+            .issue::<Vivo, Laboro>(GrantScope::Reserved, Duration::from_secs(60))
+            .await;
         assert!(matches!(res, Err(GrantError::AuditFailed)));
     }
 
-    #[test]
-    fn grant_is_not_expired_at_issue_and_is_expired_past_ttl() {
+    #[tokio::test]
+    async fn grant_is_not_expired_at_issue_and_is_expired_past_ttl() {
         let mut log = InMemoryAudit::default();
         let ttl = Duration::from_secs(10);
         let grant: CrossContextGrant<Socio, Laboro> = log
             .issue::<Socio, Laboro>(GrantScope::Reserved, ttl)
+            .await
             .expect("grant issuance");
 
         assert!(!grant.is_expired(grant.issued_at()));
@@ -341,31 +359,34 @@ mod tests {
         assert!(grant.is_expired(grant.expires_at() + Duration::from_secs(1)));
     }
 
-    #[test]
-    fn debug_format_shows_context_labels_and_does_not_leak_private_state() {
+    #[tokio::test]
+    async fn debug_format_shows_context_labels_and_does_not_leak_private_state() {
         let mut log = InMemoryAudit::default();
         let grant: CrossContextGrant<Vivo, Laboro> = log
             .issue::<Vivo, Laboro>(GrantScope::Reserved, Duration::from_secs(60))
+            .await
             .expect("grant issuance");
         let rendered = format!("{grant:?}");
         assert!(rendered.contains("konekto.context.vivo.v1"));
         assert!(rendered.contains("konekto.context.laboro.v1"));
     }
 
-    #[test]
-    fn audit_ids_are_distinct_across_issuances() {
+    #[tokio::test]
+    async fn audit_ids_are_distinct_across_issuances() {
         let mut log = InMemoryAudit::default();
         let a: CrossContextGrant<Vivo, Laboro> = log
             .issue::<Vivo, Laboro>(GrantScope::Reserved, Duration::from_secs(60))
+            .await
             .unwrap();
         let b: CrossContextGrant<Vivo, Laboro> = log
             .issue::<Vivo, Laboro>(GrantScope::Reserved, Duration::from_secs(60))
+            .await
             .unwrap();
         assert_ne!(a.audit_id(), b.audit_id());
     }
 
-    #[test]
-    fn grants_carry_distinct_compile_time_types_per_context_pair() {
+    #[tokio::test]
+    async fn grants_carry_distinct_compile_time_types_per_context_pair() {
         // This test documents (and exercises) that distinct `(From, To)`
         // pairs produce distinct, non-coercible types. Attempting to bind
         // the result of `issue::<Vivo, Laboro>` into a
@@ -375,9 +396,11 @@ mod tests {
         let mut log = InMemoryAudit::default();
         let _a: CrossContextGrant<Vivo, Laboro> = log
             .issue::<Vivo, Laboro>(GrantScope::Reserved, Duration::from_secs(60))
+            .await
             .unwrap();
         let _b: CrossContextGrant<Laboro, Socio> = log
             .issue::<Laboro, Socio>(GrantScope::Reserved, Duration::from_secs(60))
+            .await
             .unwrap();
     }
 

@@ -47,8 +47,9 @@ impl InMemoryAuditLog {
     }
 }
 
+#[async_trait::async_trait]
 impl AuditLog for InMemoryAuditLog {
-    fn record_grant(&mut self, record: &GrantRecord) -> Result<AuditId, AuditWriteError> {
+    async fn record_grant(&mut self, record: &GrantRecord) -> Result<AuditId, AuditWriteError> {
         // `fetch_add` returns the previous value; +1 so the first id
         // is 1 (matches the expectation that 0 is never a live id).
         let id_value = u128::from(self.next_id.fetch_add(1, Ordering::SeqCst) + 1);
@@ -64,15 +65,17 @@ mod tests {
     use konekto_core::{AuditLog, CrossContextGrant, GrantScope, Laboro, Vivo};
     use std::time::Duration;
 
-    #[test]
-    fn issues_grant_and_records_in_order() {
+    #[tokio::test]
+    async fn issues_grant_and_records_in_order() {
         let mut log = InMemoryAuditLog::new();
         assert!(log.is_empty());
         let _g1: CrossContextGrant<Vivo, Laboro> = log
             .issue::<Vivo, Laboro>(GrantScope::Reserved, Duration::from_secs(60))
+            .await
             .expect("first grant");
         let _g2: CrossContextGrant<Vivo, Laboro> = log
             .issue::<Vivo, Laboro>(GrantScope::Reserved, Duration::from_secs(60))
+            .await
             .expect("second grant");
         assert_eq!(log.len(), 2);
         let ids: Vec<_> = log.records().iter().map(|(id, _)| id.as_u128()).collect();

@@ -28,6 +28,8 @@
 
 pub mod audit;
 pub mod identity;
+#[cfg(feature = "postgres")]
+pub mod pg;
 pub mod records;
 
 mod error;
