@@ -134,7 +134,74 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
     passphrase 401, unknown identity 401 (oracle check), short
     passphrase 400.
 
+- `konekto-core`: hybrid JWS session-token primitive
+  (ADR-0003 Phase A, ADR-0006).
+  - `token::Claims` / `ContextLabel` — V1 claim shape (`iss`, `sub`,
+    `ctx`, `iat`, `nbf`, `exp`, `jti`, `amr`, `ver` plus optional
+    `aud`, `acr`, `cnf`). `TOKEN_VERSION = 1` is enforced at verify
+    time so bumping the shape is a fail-closed wire change.
+  - `token::SigningKeys` / `VerifyingKeys` — Ed25519 (`aws-lc-rs`) +
+    ML-DSA-65 (`ml-dsa 0.1.0-rc.8`) bundles with a deterministic
+    `Kid` = `BLAKE2s-128(ed25519_pk || ml_dsa_pk)`. `generate_ephemeral`
+    for dev bootstrap; `from_env` / `from_encoded` for reusable keys
+    across restarts. ML-DSA signing keys are stored as the 32-byte
+    canonical seed.
+  - `token::TokenIssuer<K>` / `TokenVerifier<K>` — parameterized over
+    a `Clock` trait (`SystemClock` in prod, `FixedClock` in tests).
+    Emits / consumes JWS JSON General Serialization (RFC 7515 §7.2.1)
+    with exactly two signatures; both MUST verify, no short-circuit.
+    Verifies `ver`, `iss`, `nbf`, `exp` with leeway.
+    `DEFAULT_ACCESS_TTL = 5 min`, `DEFAULT_CLOCK_LEEWAY = 30 s`.
+  - `token::TokenError` — eleven internal variants, collapsed to an
+    opaque 401 at the HTTP boundary so token-shape details don't leak.
+  - Extends `Context` trait with `const CONTEXT_LABEL: ContextLabel`
+    so the type-level context marker projects onto the wire claim.
+- `konekto-api`: access-token minting and `AuthedContext<C>` extractor.
+  - `POST /dev/login` response additively gains `access_token`,
+    `token_type` (`"Bearer"`), and `expires_in` (seconds). Existing
+    `identity_id` and `context` fields are preserved.
+  - `auth::AuthedContext<C>`: axum `FromRequestParts` extractor that
+    reads `Authorization: Bearer <jws>`, verifies the token, and
+    compares `claims.ctx` against `C::CONTEXT_LABEL`. Any mismatch,
+    missing header, bad signature, or expired token surfaces as a
+    uniform `401 { "error": "unauthorized" }`.
+  - Three context-typed endpoints —
+    `GET /vivo/whoami`, `GET /laboro/whoami`, `GET /socio/whoami` —
+    each returns `{ identity_id, context, expires_at }`. A `vivo`
+    token presented to `/laboro/whoami` is rejected before the
+    handler body runs.
+  - `AppState<S, K: Clock = SystemClock>`: gains `Arc<TokenIssuer<K>>`
+    + `Arc<TokenVerifier<K>>` fields. Generic over `Clock` so tests
+    can wire `FixedClock` to drive the expired-token path.
+  - Binary bootstrap (`src/main.rs`): reads
+    `TOKEN_SIGNING_ED25519_SK` + `TOKEN_SIGNING_MLDSA_SK` env vars as
+    base64url seeds, or generates an ephemeral keypair with a
+    `tracing::warn!`. `KONEKTO_ISSUER` (default `konekto-dev`)
+    controls the `iss` claim.
+  - Nine additional `tower::ServiceExt::oneshot` tests: JWS shape,
+    login-response compat, happy-path whoami, cross-context rejection
+    (vivo token → laboro endpoint, socio token → laboro endpoint),
+    missing header, malformed bearer, tampered ML-DSA signature, and
+    expired-token-via-`FixedClock`.
+- Workspace `.cargo/config.toml` sets `RUST_MIN_STACK = 8 MiB` so
+  `cargo test` does not overflow ML-DSA-65's large intermediate
+  stack allocations on the 2 MiB default test-thread stack.
+- `docs/adr/0006-hybrid-jws-token-implementation.md`: records the
+  wire-format choice (hand-rolled General Serialization), key
+  bootstrap strategy, `Kid` derivation, clock abstraction,
+  `Context::CONTEXT_LABEL` bridge, and the deferred items
+  (JWKS / rotation / refresh / DPoP / KMS / IANA alg registration).
+
 ### Changed
+- `konekto-api`: `POST /dev/login` response body is extended with
+  `access_token`, `token_type`, `expires_in`. The existing
+  `identity_id` and `context` fields retain their previous shapes and
+  semantics — the change is purely additive for consumers that only
+  read those two fields.
+- `konekto-core::Context`: trait gains a required
+  `const CONTEXT_LABEL: ContextLabel` associated constant. Impacts
+  only in-crate implementors (`Vivo` / `Laboro` / `Socio`); the trait
+  is sealed, so this is not a breaking change for downstream crates.
 - `konekto-db`: `audit_log.id` column changed from `NUMERIC(39,0)` to
   `BYTEA CHECK (octet_length = 16)` (pre-alpha, safe to edit migration
   0001). Avoids a `bigdecimal` dependency in the Postgres driver and
