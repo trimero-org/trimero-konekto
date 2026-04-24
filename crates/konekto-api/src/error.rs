@@ -24,6 +24,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use konekto_core::token::TokenError;
 use konekto_core::Error as CryptoError;
 use konekto_db::identity::{EnrollmentError, LoginError};
 use konekto_db::DbError;
@@ -128,5 +129,28 @@ impl From<DbError> for ApiError {
     fn from(err: DbError) -> Self {
         tracing::error!(error = %err, "db error at api boundary");
         Self::Internal
+    }
+}
+
+impl From<TokenError> for ApiError {
+    fn from(err: TokenError) -> Self {
+        match err {
+            // Emit / sign-side failures are internal: they indicate a
+            // signing-key environment or serialization problem, not a
+            // bad caller input.
+            TokenError::SigningFailed | TokenError::PayloadEncoding | TokenError::EnvConfig => {
+                tracing::error!(?err, "token issuance failed");
+                Self::Internal
+            }
+            // Every other variant is a verifier-side rejection. They
+            // all collapse to the same opaque 401 so the response
+            // doesn't become a side-channel about token shape. The
+            // variant itself is logged at `warn` so operators keep
+            // diagnosability.
+            _ => {
+                tracing::warn!(?err, "token rejected");
+                Self::Unauthorized
+            }
+        }
     }
 }
