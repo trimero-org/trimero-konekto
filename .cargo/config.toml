@@ -1,0 +1,8 @@
+[env]
+# ML-DSA-65 signing / key-gen allocates large intermediate matrices on the
+# stack. The default Rust test harness thread stack (2 MiB) is not enough —
+# `ml-dsa 0.1.0-rc.8` overflows while computing a signature. 8 MiB matches
+# the Linux main-thread default and leaves generous headroom. Revisit when
+# `ml-dsa` ships a heap-backed expanded signing key (tracked in ADR-0006
+# §6 as a deferred upstream dependency concern).
+RUST_MIN_STACK = "8388608"

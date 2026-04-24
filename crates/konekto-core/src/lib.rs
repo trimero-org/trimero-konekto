@@ -27,6 +27,7 @@ mod grant;
 mod kdf;
 mod key;
 mod random;
+pub mod token;
 mod wrap;
 
 pub use context::{Context, Laboro, Socio, Vivo};
@@ -37,4 +38,9 @@ pub use grant::{
 pub use kdf::{PassphraseParams, MIN_PASSPHRASE_LEN, MIN_SALT_LEN};
 pub use key::{ContextKey, RootKey, KEY_SIZE};
 pub use random::{fill_random, random_bytes};
+pub use token::{
+    Claims, Clock, ContextLabel, FixedClock, Jwt, Kid, SigningKeys, SystemClock, TokenError,
+    TokenIssuer, TokenVerifier, VerifyingKeys, DEFAULT_ACCESS_TTL, DEFAULT_CLOCK_LEEWAY,
+    ENV_ED25519_SK, ENV_MLDSA_SK, TOKEN_VERSION,
+};
 pub use wrap::{WrappedRootKey, WrappingKey};

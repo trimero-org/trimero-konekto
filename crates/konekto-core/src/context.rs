@@ -24,6 +24,15 @@
 pub trait Context: private::Sealed + Copy + Clone + core::fmt::Debug + 'static {
     /// HKDF `info` parameter — versioned and domain-separated.
     const LABEL: &'static [u8];
+
+    /// Wire-form label used in session-token `ctx` claims.
+    ///
+    /// Projects the type-level context marker onto the
+    /// [`crate::token::ContextLabel`] enum so that
+    /// [`crate::token::TokenIssuer`] / [`crate::token::TokenVerifier`]
+    /// can bridge between `konekto-api`'s `AuthedContext<C>`
+    /// extractor and the serialized claim.
+    const CONTEXT_LABEL: crate::token::ContextLabel;
 }
 
 mod private {
@@ -48,16 +57,19 @@ pub struct Socio;
 impl private::Sealed for Vivo {}
 impl Context for Vivo {
     const LABEL: &'static [u8] = b"konekto.context.vivo.v1";
+    const CONTEXT_LABEL: crate::token::ContextLabel = crate::token::ContextLabel::Vivo;
 }
 
 impl private::Sealed for Laboro {}
 impl Context for Laboro {
     const LABEL: &'static [u8] = b"konekto.context.laboro.v1";
+    const CONTEXT_LABEL: crate::token::ContextLabel = crate::token::ContextLabel::Laboro;
 }
 
 impl private::Sealed for Socio {}
 impl Context for Socio {
     const LABEL: &'static [u8] = b"konekto.context.socio.v1";
+    const CONTEXT_LABEL: crate::token::ContextLabel = crate::token::ContextLabel::Socio;
 }
 
 #[cfg(test)]
