@@ -192,12 +192,84 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `Context::CONTEXT_LABEL` bridge, and the deferred items
   (JWKS / rotation / refresh / DPoP / KMS / IANA alg registration).
 
+- `konekto-core`: opaque session + refresh-token primitives
+  (ADR-0003 Phase B, ADR-0007).
+  - `token::SessionId` and `token::RefreshTokenSecret` — distinct
+    newtypes wrapping a 32-byte CSPRNG value, base64url-encoded with
+    no padding. Construction gated through `::generate()` (CSPRNG)
+    and `::from_wire(String)` (validates non-empty); `Debug` is
+    redacted so wire values never reach logs.
+  - `BLAKE2s-256` hashing via `::hash()` — the store sees only
+    digests; raw bearers never re-emit from storage.
+  - TTL constants: `SESSION_IDLE_TTL_SECS` (30 min),
+    `SESSION_ABSOLUTE_TTL_SECS` (12 h), `REFRESH_IDLE_TTL_SECS`
+    (30 days), `REFRESH_ABSOLUTE_TTL_SECS` (90 days).
+  - `TokenVerifier::clock()` accessor so the HTTP layer reads the
+    same time source the verifier uses.
+- `konekto-db`: `SessionStore` trait covering both first-party
+  sessions and OAuth refresh tokens.
+  - `SessionRecord` carries identity, context, sliding `idle_expires_at`
+    and hard `absolute_expires_at`, plus an optional
+    `linked_refresh_family` so logout cascades both surfaces.
+  - `RefreshTokenRecord` + `RefreshStatus` (`Active` | `Rotated` |
+    `Revoked`) implement single-use rotation with theft detection;
+    presenting a rotated member moves the entire family to `Revoked`.
+  - `SessionLookup` + `RefreshOutcome` expose the distinguishable
+    cases; the HTTP layer collapses them all to opaque 401s.
+  - `InMemorySessionStore`: process-local backend behind
+    `Arc<Mutex<…>>`. Ships in the binary; Redis is an ADR-0007
+    follow-up.
+- `konekto-api`: refresh, first-party session cookie, `/dev/me`,
+  `/dev/logout`.
+  - `POST /dev/login` response gains `refresh_token`. The login also
+    creates a first-party session and writes
+    `Set-Cookie: konekto_session=<id>; HttpOnly; SameSite=Strict;
+    Path=/; Max-Age=43200; Secure` (Secure gated by `CookieConfig`).
+  - `POST /dev/refresh` — single-use rotation. Replaying a rotated
+    secret triggers theft detection and revokes the entire family.
+    Response shape mirrors `/dev/login`'s token block minus the
+    identity / context echoes.
+  - `auth::AuthedSession` extractor — reads the `konekto_session`
+    cookie, looks the hash up in the `SessionStore`, slides the
+    idle window forward via `touch_session`, returns
+    `{ identity_id, ctx, idle_expires_at, absolute_expires_at }`.
+    Composes with `Json<T>` (uses `FromRequestParts`).
+  - `GET /dev/me` — echoes the first-party session.
+  - `POST /dev/logout` — drops the session and cascades
+    revocation to the linked refresh family. Idempotent on the wire
+    (unknown / forged cookies still 204) so it's not an oracle for
+    session existence. Always emits a `Set-Cookie` with `Max-Age=0`.
+  - `state::CookieConfig` — `production()` (Secure set) /
+    `insecure_dev()` (Secure cleared) / `KONEKTO_COOKIE_SECURE`
+    env-driven knob in the binary, with a loud warning when cleared.
+  - `AppState` gains a `Sess: SessionStore` generic alongside the
+    existing `S: ApiStore` and `K: Clock`. Three independent backends
+    matches ADR-0003 (Postgres for identity, Redis for sessions in
+    production).
+  - Eleven additional `tower::ServiceExt::oneshot` tests cover cookie
+    attributes (default + Secure), `/dev/me` happy / unknown / no-cookie
+    paths, refresh rotation + replay-as-theft + unknown / empty
+    payloads, and the logout cascade across both surfaces.
+- `docs/adr/0007-session-and-refresh-storage.md`: records the storage
+  primitives (hashed bearers, dual-newtype distinction, single
+  `SessionStore` trait), refresh-rotation lifecycle and theft
+  detection, the cookie attribute set, the in-memory-in-prod posture,
+  and the Redis / DPoP / OAuth deferrals.
+
 ### Changed
 - `konekto-api`: `POST /dev/login` response body is extended with
-  `access_token`, `token_type`, `expires_in`. The existing
-  `identity_id` and `context` fields retain their previous shapes and
-  semantics — the change is purely additive for consumers that only
-  read those two fields.
+  `access_token`, `token_type`, `expires_in`, and (Phase B)
+  `refresh_token`. Login also writes a `Set-Cookie:
+  konekto_session=…` header. The existing `identity_id` and
+  `context` fields retain their previous shapes and semantics —
+  the body change is purely additive for consumers that only read
+  those two fields, and consumers that ignore `Set-Cookie` keep
+  working.
+- `konekto-api::AppState`: gains a `Sess: SessionStore` generic
+  parameter (Phase B) alongside `S: ApiStore` and `K: Clock`.
+  In-tree only; `axum::extract::State` callers in the binary and
+  tests pass through unchanged once the new in-memory session
+  store is supplied.
 - `konekto-core::Context`: trait gains a required
   `const CONTEXT_LABEL: ContextLabel` associated constant. Impacts
   only in-crate implementors (`Vivo` / `Laboro` / `Socio`); the trait
