@@ -23,6 +23,7 @@ pub mod clock;
 pub mod error;
 pub mod jws;
 pub mod keys;
+pub mod session;
 pub mod sign_ed25519;
 pub mod sign_mldsa;
 
@@ -31,3 +32,7 @@ pub use clock::{Clock, FixedClock, SystemClock};
 pub use error::TokenError;
 pub use jws::{Jwt, TokenIssuer, TokenVerifier, DEFAULT_ACCESS_TTL, DEFAULT_CLOCK_LEEWAY};
 pub use keys::{Kid, SigningKeys, VerifyingKeys, ENV_ED25519_SK, ENV_MLDSA_SK};
+pub use session::{
+    RefreshTokenSecret, SessionId, REFRESH_ABSOLUTE_TTL_SECS, REFRESH_IDLE_TTL_SECS,
+    SESSION_ABSOLUTE_TTL_SECS, SESSION_HASH_LEN, SESSION_IDLE_TTL_SECS, SESSION_SECRET_LEN,
+};

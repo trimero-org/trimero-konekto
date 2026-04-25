@@ -31,6 +31,7 @@ pub mod identity;
 #[cfg(feature = "postgres")]
 pub mod pg;
 pub mod records;
+pub mod session;
 
 mod error;
 pub use error::DbError;

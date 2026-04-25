@@ -39,8 +39,10 @@ pub use kdf::{PassphraseParams, MIN_PASSPHRASE_LEN, MIN_SALT_LEN};
 pub use key::{ContextKey, RootKey, KEY_SIZE};
 pub use random::{fill_random, random_bytes};
 pub use token::{
-    Claims, Clock, ContextLabel, FixedClock, Jwt, Kid, SigningKeys, SystemClock, TokenError,
-    TokenIssuer, TokenVerifier, VerifyingKeys, DEFAULT_ACCESS_TTL, DEFAULT_CLOCK_LEEWAY,
-    ENV_ED25519_SK, ENV_MLDSA_SK, TOKEN_VERSION,
+    Claims, Clock, ContextLabel, FixedClock, Jwt, Kid, RefreshTokenSecret, SessionId, SigningKeys,
+    SystemClock, TokenError, TokenIssuer, TokenVerifier, VerifyingKeys, DEFAULT_ACCESS_TTL,
+    DEFAULT_CLOCK_LEEWAY, ENV_ED25519_SK, ENV_MLDSA_SK, REFRESH_ABSOLUTE_TTL_SECS,
+    REFRESH_IDLE_TTL_SECS, SESSION_ABSOLUTE_TTL_SECS, SESSION_HASH_LEN, SESSION_IDLE_TTL_SECS,
+    SESSION_SECRET_LEN, TOKEN_VERSION,
 };
 pub use wrap::{WrappedRootKey, WrappingKey};
