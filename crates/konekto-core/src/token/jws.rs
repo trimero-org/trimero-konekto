@@ -170,6 +170,15 @@ impl<C: Clock> TokenVerifier<C> {
         }
     }
 
+    /// Borrow the verifier's clock. Exposed so adjacent extractors
+    /// (notably `AuthedSession` in `konekto-api`) read the same time
+    /// source as the JWS verifier — substituting a `FixedClock` in
+    /// tests then drives both the token-expiry path and the
+    /// session-expiry path off one synthetic clock.
+    pub fn clock(&self) -> &C {
+        &self.clock
+    }
+
     /// Verify a serialized JWS.
     ///
     /// On success, returns the decoded [`Claims`]. On failure, returns

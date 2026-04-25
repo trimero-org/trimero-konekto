@@ -6,7 +6,8 @@
 //! 2. Open a Postgres pool from `DATABASE_URL`.
 //! 3. Run embedded SQL migrations idempotently.
 //! 4. Load hybrid-JWS signing keys (env vars, or ephemeral + warning).
-//! 5. Build the router on top of [`konekto_api::AppState`].
+//! 5. Build the router on top of [`konekto_api::AppState`] with an
+//!    in-memory session store (Redis impl deferred — ADR-0007).
 //! 6. Bind `BIND_ADDR` (default `127.0.0.1:8080`) and serve with
 //!    graceful shutdown on Ctrl-C / SIGTERM.
 //!
@@ -24,21 +25,28 @@
 //!   Mixing one present and one missing is treated as "both missing".
 //! - `KONEKTO_ISSUER` — optional. String used as the `iss` claim.
 //!   Default `konekto-dev`.
+//! - `KONEKTO_COOKIE_SECURE` — optional. `"true"` (default) emits the
+//!   `Secure` attribute on the session cookie; `"false"` clears it
+//!   for HTTP localhost development. Any other value is rejected at
+//!   boot.
 
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use konekto_api::{build_router, AppState};
+use konekto_api::{build_router, AppState, CookieConfig};
 use konekto_core::token::{
     SigningKeys, SystemClock, TokenIssuer, TokenVerifier, DEFAULT_ACCESS_TTL, ENV_ED25519_SK,
     ENV_MLDSA_SK,
 };
 use konekto_db::pg::PgIdentityStore;
+use konekto_db::session::InMemorySessionStore;
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+const ENV_COOKIE_SECURE: &str = "KONEKTO_COOKIE_SECURE";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -49,6 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
         .parse()?;
     let issuer_claim = env::var("KONEKTO_ISSUER").unwrap_or_else(|_| "konekto-dev".to_string());
+    let cookie_config = load_cookie_config()?;
 
     tracing::info!(%bind_addr, "starting konekto-api");
 
@@ -77,7 +86,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         issuer_claim,
     ));
 
-    let app = build_router(AppState::new(store, issuer, verifier));
+    let sessions = InMemorySessionStore::new();
+    tracing::warn!(
+        "session and refresh storage is process-local; tokens are \
+         invalidated on restart (ADR-0007 follow-up: Redis backend)"
+    );
+
+    let app = build_router(
+        AppState::new(store, sessions, issuer, verifier).with_cookie_config(cookie_config),
+    );
 
     let listener = TcpListener::bind(bind_addr).await?;
     tracing::info!(%bind_addr, "listening");
@@ -87,6 +104,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     Ok(())
+}
+
+fn load_cookie_config() -> Result<CookieConfig, Box<dyn std::error::Error>> {
+    match env::var(ENV_COOKIE_SECURE).as_deref() {
+        Ok("true") | Err(_) => Ok(CookieConfig::production()),
+        Ok("false") => {
+            tracing::warn!(
+                "KONEKTO_COOKIE_SECURE=false — session cookie emitted without `Secure`; \
+                 HTTP localhost development only"
+            );
+            Ok(CookieConfig::insecure_dev())
+        }
+        Ok(other) => {
+            Err(format!("{ENV_COOKIE_SECURE} must be `true` or `false`, got {other:?}").into())
+        }
+    }
 }
 
 fn load_signing_keys() -> Result<SigningKeys, Box<dyn std::error::Error>> {

@@ -1,86 +1,132 @@
-//! Application state and the store-capability trait.
+//! Application state and the store-capability traits.
 //!
-//! [`AppState`] is parameterised over `S: ApiStore`, so the same
-//! router wires up cleanly against either the in-memory store used
-//! in tests or the Postgres-backed store used in production.
+//! [`AppState`] is parameterised over three independent backends:
 //!
-//! It is also parameterised over a [`Clock`] (default [`SystemClock`])
-//! so integration tests can substitute [`konekto_core::token::FixedClock`]
-//! to drive `iat` / `exp` / `nbf` deterministically.
+//! - `S: ApiStore` — the identity / audit surface (Postgres in prod,
+//!   in-memory in tests).
+//! - `Sess: SessionStore` — the first-party session and OAuth refresh
+//!   surface (in-memory in V1; Redis tracked under ADR-0007).
+//! - `K: Clock` — `SystemClock` in prod, `FixedClock` in expiration
+//!   tests.
+//!
+//! The three are kept as distinct generics rather than bundled into
+//! one trait because their canonical production backends diverge —
+//! Postgres for identity, Redis for sessions — and bundling them
+//! would force every test or future deployment to carry both.
 
 use std::sync::Arc;
 
 use konekto_core::token::{Clock, SystemClock, TokenIssuer, TokenVerifier};
 use konekto_core::{AuditLog, PassphraseParams};
 use konekto_db::identity::IdentityStore;
+use konekto_db::session::SessionStore;
 
-/// Capability blanket: a store usable as the backing state of the
-/// HTTP API must expose the identity surface, the audit log, and
-/// be safely cloneable across request tasks.
+/// Capability blanket: a store usable as the identity backing of the
+/// HTTP API must expose the identity surface, the audit log, and be
+/// safely cloneable across request tasks.
 ///
 /// `axum::extract::State` requires `Clone + Send + Sync + 'static`.
-/// `Clone` is cheap for the canonical backends:
-///
-/// - [`konekto_db::pg::PgIdentityStore`] — the pool is internally
-///   reference-counted, so clone is cheap and the underlying
-///   connection pool is shared across all cloned handles.
-/// - [`konekto_db::identity::InMemoryStore`] is not directly
-///   `Clone`, but a test-side adapter (`SharedInMemoryStore`)
-///   wraps it in `Arc<Mutex<_>>` and satisfies the bound.
+/// Production [`konekto_db::pg::PgIdentityStore`] is internally
+/// reference-counted, so clone is cheap; in-memory tests use a
+/// `SharedInMemoryStore` adapter that wraps the raw store in
+/// `Arc<Mutex<_>>`.
 pub trait ApiStore: IdentityStore + AuditLog + Clone + Send + Sync + 'static {}
 
 impl<T> ApiStore for T where T: IdentityStore + AuditLog + Clone + Send + Sync + 'static {}
 
+/// Cookie attributes applied to the first-party session
+/// (`konekto_session`).
+///
+/// `secure` is the only knob exposed at runtime; everything else is
+/// fixed by ADR-0003 §1 (`HttpOnly`, `SameSite=Strict`, `Path=/`). Setting
+/// `secure = false` is intended for HTTP localhost development only;
+/// production must set it true so the cookie never crosses an
+/// untrusted transport.
+#[derive(Debug, Clone, Copy)]
+pub struct CookieConfig {
+    /// Emit the `Secure` attribute on the session cookie.
+    pub secure: bool,
+}
+
+impl CookieConfig {
+    /// Production-safe defaults: `Secure` set.
+    #[must_use]
+    pub const fn production() -> Self {
+        Self { secure: true }
+    }
+
+    /// Development-only defaults: `Secure` cleared. Logged with a
+    /// warning at boot whenever this is selected.
+    #[must_use]
+    pub const fn insecure_dev() -> Self {
+        Self { secure: false }
+    }
+}
+
+impl Default for CookieConfig {
+    fn default() -> Self {
+        Self::production()
+    }
+}
+
 /// Shared application state handed to every request via
 /// `axum::extract::State`.
 ///
-/// Carries the Argon2id parameters the enrollment flow applies to
-/// fresh identities. Production bootstrap uses
-/// [`PassphraseParams::DEFAULT`]; tests substitute cheaper values so
-/// they don't pay the full 19 MiB / 2-iter cost per request.
-///
-/// Also carries the [`TokenIssuer`] / [`TokenVerifier`] pair used by
-/// `/dev/login` to mint access tokens and by the `AuthedContext<C>`
-/// extractor to check them. Both are wrapped in [`Arc`] so that
-/// cloning the state across request tasks does not duplicate the
-/// signing-key bundle.
-pub struct AppState<S: ApiStore, K: Clock = SystemClock> {
-    /// The underlying persistence + audit backend.
+/// Carries the Argon2id parameters for fresh enrollments, the
+/// hybrid-JWS issuer/verifier, the session/refresh-token store, and
+/// the cookie attribute set. All non-`Copy` fields are wrapped in
+/// [`Arc`] so cloning across request tasks is cheap.
+pub struct AppState<S: ApiStore, Sess: SessionStore, K: Clock = SystemClock> {
+    /// The underlying identity persistence + audit backend.
     pub store: S,
+    /// The session / refresh-token storage backend.
+    pub sessions: Sess,
     /// Argon2id parameters used when enrolling new identities.
     pub passphrase_params: PassphraseParams,
-    /// Token issuer used by `/dev/login`.
+    /// Token issuer used by `/dev/login` and `/dev/refresh`.
     pub issuer: Arc<TokenIssuer<K>>,
-    /// Token verifier consulted by the `AuthedContext<C>` extractor.
+    /// Token verifier consulted by the [`crate::auth::AuthedContext`]
+    /// extractor.
     pub verifier: Arc<TokenVerifier<K>>,
+    /// Cookie attributes for the first-party session cookie.
+    pub cookie_config: CookieConfig,
 }
 
 // Manual `Clone` so we do NOT require `K: Clone` — the `Arc<_>` fields
-// are cheap-cloneable regardless of `K`, and the derive macro would add
-// an unnecessary bound that `SystemClock` / `FixedClock` do not both
-// satisfy without Clone being expressible on every `Clock` impl.
-impl<S: ApiStore, K: Clock> Clone for AppState<S, K> {
+// are cheap-cloneable regardless of `K`, and the derive macro would
+// add unnecessary bounds.
+impl<S: ApiStore, Sess: SessionStore, K: Clock> Clone for AppState<S, Sess, K> {
     fn clone(&self) -> Self {
         Self {
             store: self.store.clone(),
+            sessions: self.sessions.clone(),
             passphrase_params: self.passphrase_params,
             issuer: Arc::clone(&self.issuer),
             verifier: Arc::clone(&self.verifier),
+            cookie_config: self.cookie_config,
         }
     }
 }
 
-impl<S: ApiStore, K: Clock> AppState<S, K> {
-    /// Wrap an existing store + token issuer/verifier pair as
+impl<S: ApiStore, Sess: SessionStore, K: Clock> AppState<S, Sess, K> {
+    /// Wrap a store + session store + token issuer/verifier as
     /// application state with production Argon2id parameters
-    /// ([`PassphraseParams::DEFAULT`]).
+    /// ([`PassphraseParams::DEFAULT`]) and production cookie
+    /// attributes ([`CookieConfig::production`]).
     #[must_use]
-    pub fn new(store: S, issuer: Arc<TokenIssuer<K>>, verifier: Arc<TokenVerifier<K>>) -> Self {
+    pub fn new(
+        store: S,
+        sessions: Sess,
+        issuer: Arc<TokenIssuer<K>>,
+        verifier: Arc<TokenVerifier<K>>,
+    ) -> Self {
         Self {
             store,
+            sessions,
             passphrase_params: PassphraseParams::DEFAULT,
             issuer,
             verifier,
+            cookie_config: CookieConfig::production(),
         }
     }
 
@@ -89,6 +135,14 @@ impl<S: ApiStore, K: Clock> AppState<S, K> {
     #[must_use]
     pub fn with_passphrase_params(mut self, params: PassphraseParams) -> Self {
         self.passphrase_params = params;
+        self
+    }
+
+    /// Override cookie attributes (e.g., relax `Secure` for HTTP
+    /// localhost dev). Production bootstrap should not call this.
+    #[must_use]
+    pub fn with_cookie_config(mut self, config: CookieConfig) -> Self {
+        self.cookie_config = config;
         self
     }
 }

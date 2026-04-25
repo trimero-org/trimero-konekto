@@ -88,6 +88,15 @@ impl SessionId {
         &self.0
     }
 
+    /// Consume the newtype, yielding the raw wire string. Used at the
+    /// HTTP boundary when the value is moved into a `Set-Cookie`
+    /// header — past that point the typed wrapper offers no safety
+    /// the response builder can preserve.
+    #[must_use]
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+
     /// BLAKE2s-256 digest of the wire representation, suitable as the
     /// storage key in [`crate::SessionStore`](../../konekto_db).
     #[must_use]
@@ -135,6 +144,13 @@ impl RefreshTokenSecret {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Consume the newtype, yielding the raw wire string. Used at the
+    /// HTTP boundary when the value is moved into a JSON body.
+    #[must_use]
+    pub fn into_inner(self) -> String {
+        self.0
     }
 
     /// BLAKE2s-256 digest of the wire representation.
