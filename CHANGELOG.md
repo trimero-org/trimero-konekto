@@ -256,6 +256,33 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   detection, the cookie attribute set, the in-memory-in-prod posture,
   and the Redis / DPoP / OAuth deferrals.
 
+- `konekto-core`: JWKS publication primitive (ADR-0008).
+  - `token::jwks::to_jwk_set(&VerifyingKeys) -> serde_json::Value` —
+    pure function emitting a two-entry JWK Set. Ed25519 follows
+    RFC 8037 §2 (`kty=OKP`, `crv=Ed25519`, `alg=EdDSA`); ML-DSA-65
+    follows the in-flight `draft-ietf-jose-pqc-mldsa` shape
+    (`kty=AKP`, `alg=ML-DSA-65`, public key in the `pub` field).
+    Both entries share the `VerifyingKeys` `kid`.
+  - `VerifyingKeys::ed25519_public_key()` and
+    `VerifyingKeys::mldsa_public_key()` accessors promoted from
+    `pub(crate)` to `pub` so the JWKS path can read raw bytes
+    without re-exporting the underlying verifier types.
+  - `TokenVerifier::verifying_keys()` accessor promoted from
+    `pub(crate)` to `pub` so the API layer can publish JWKS straight
+    from `AppState.verifier` without a separate state slot.
+- `konekto-api`: `GET /.well-known/jwks.json` endpoint.
+  - Public, unauthenticated; emits the bundle from `AppState.verifier`
+    with `Content-Type: application/jwk-set+json` (RFC 7517 §8.5.1)
+    and `Cache-Control: public, max-age=300`.
+  - Four additional `tower::ServiceExt::oneshot` tests: shape (two
+    keys, distinct algs), response headers, kid-matches-active-token,
+    and a round-trip that reconstructs an `Ed25519Verifier` from the
+    published `x` and verifies the EdDSA leg of a freshly issued token.
+- `docs/adr/0008-jwks-publication-endpoint.md`: records the JWK
+  shapes (Ed25519 / in-flight ML-DSA-65), the single-kid hybrid
+  invariant, the response-header set, the verifier-as-source-of-truth
+  posture, and the rotation / OIDC discovery / signed-JWKS deferrals.
+
 ### Changed
 - `konekto-api`: `POST /dev/login` response body is extended with
   `access_token`, `token_type`, `expires_in`, and (Phase B)
