@@ -30,7 +30,7 @@ use serde_json::json;
 use super::claims::{Claims, ContextLabel, TOKEN_VERSION};
 use super::clock::Clock;
 use super::error::TokenError;
-use super::keys::{SigningKeys, VerifyingKeys};
+use super::keys::{Keyring, SigningKeys};
 
 /// Default access-token lifetime (5 minutes, per ADR-0003 §3).
 pub const DEFAULT_ACCESS_TTL: Duration = Duration::from_secs(5 * 60);
@@ -135,10 +135,17 @@ impl<C: Clock> TokenIssuer<C> {
     }
 }
 
-/// Verifies access tokens against a fixed [`VerifyingKeys`] bundle,
-/// issuer string, and clock leeway.
+/// Verifies access tokens against a [`Keyring`] (one primary verifying
+/// bundle plus zero or more retired bundles), an issuer string, and a
+/// clock leeway.
+///
+/// On each call, [`Self::verify`] parses the `kid` from each signature
+/// block, requires both blocks to carry the same `kid`, and looks up
+/// the matching bundle in the keyring. Tokens whose `kid` belongs to a
+/// retired bundle still verify — that is the rotation invariant from
+/// ADR-0009 §2.
 pub struct TokenVerifier<C: Clock> {
-    keys: VerifyingKeys,
+    keys: Keyring,
     clock: C,
     issuer: String,
     leeway: Duration,
@@ -148,21 +155,28 @@ pub struct TokenVerifier<C: Clock> {
 impl<C: Clock> TokenVerifier<C> {
     /// Build a verifier with the default clock leeway
     /// ([`DEFAULT_CLOCK_LEEWAY`]).
+    ///
+    /// `keys` accepts either a [`Keyring`] or any single
+    /// [`super::keys::VerifyingKeys`] bundle (the bundle becomes the
+    /// keyring's primary, with no retired entries).
     #[must_use]
-    pub fn new(keys: VerifyingKeys, clock: C, issuer: impl Into<String>) -> Self {
+    pub fn new(keys: impl Into<Keyring>, clock: C, issuer: impl Into<String>) -> Self {
         Self::with_leeway(keys, clock, issuer, DEFAULT_CLOCK_LEEWAY)
     }
 
     /// Build a verifier with an explicit clock leeway.
+    ///
+    /// `keys` accepts either a [`Keyring`] or any single
+    /// [`super::keys::VerifyingKeys`] bundle.
     #[must_use]
     pub fn with_leeway(
-        keys: VerifyingKeys,
+        keys: impl Into<Keyring>,
         clock: C,
         issuer: impl Into<String>,
         leeway: Duration,
     ) -> Self {
         Self {
-            keys,
+            keys: keys.into(),
             clock,
             issuer: issuer.into(),
             leeway,
@@ -179,13 +193,13 @@ impl<C: Clock> TokenVerifier<C> {
         &self.clock
     }
 
-    /// Borrow the verifier's [`VerifyingKeys`] bundle.
+    /// Borrow the verifier's [`Keyring`].
     ///
-    /// Exposed so the JWKS publication path can read the public-key
-    /// bytes without re-routing them through `AppState`. Verifying keys
-    /// carry no secret material — only public bytes and the shared
-    /// [`super::keys::Kid`].
-    pub fn verifying_keys(&self) -> &VerifyingKeys {
+    /// Exposed so the JWKS publication path can iterate every bundle
+    /// (primary + retired) without re-routing them through `AppState`.
+    /// Verifying keys carry no secret material — only public bytes and
+    /// the shared [`super::keys::Kid`].
+    pub fn keyring(&self) -> &Keyring {
         &self.keys
     }
 
@@ -211,24 +225,40 @@ impl<C: Clock> TokenVerifier<C> {
             return Err(TokenError::InvalidFormat);
         }
 
-        // Enforce {EdDSA, ML-DSA-65} as a set — each alg seen at most once.
+        let block_a = parse_sig_block(&sigs[0], payload_b64)?;
+        let block_b = parse_sig_block(&sigs[1], payload_b64)?;
+
+        // Both signature blocks must reference the same kid — they
+        // sign the same token, and a Konekto kid identifies the hybrid
+        // bundle (ADR-0008 §1).
+        if block_a.kid != block_b.kid {
+            return Err(TokenError::KidMismatch);
+        }
+
+        // Look up the bundle by the shared kid; an unknown kid is not
+        // a bundle this verifier can accept.
+        let bundle = self
+            .keys
+            .find(&block_a.kid)
+            .ok_or(TokenError::KidMismatch)?;
+
+        // Enforce {EdDSA, ML-DSA-65} as a set — both algs present, no
+        // duplicate.
         let mut seen_ed = false;
         let mut seen_ml = false;
         let mut ed_ok = false;
         let mut ml_ok = false;
 
-        for sig_obj in sigs {
-            let (alg, signing_input, sig_bytes) = self.parse_sig_block(sig_obj, payload_b64)?;
-            match alg.as_str() {
+        for block in [&block_a, &block_b] {
+            match block.alg.as_str() {
                 "EdDSA" => {
                     if seen_ed {
                         return Err(TokenError::AlgMismatch);
                     }
                     seen_ed = true;
-                    ed_ok = self
-                        .keys
+                    ed_ok = bundle
                         .ed25519()
-                        .verify(signing_input.as_bytes(), &sig_bytes)
+                        .verify(block.signing_input.as_bytes(), &block.sig_bytes)
                         .is_ok();
                 }
                 "ML-DSA-65" => {
@@ -236,10 +266,9 @@ impl<C: Clock> TokenVerifier<C> {
                         return Err(TokenError::AlgMismatch);
                     }
                     seen_ml = true;
-                    ml_ok = self
-                        .keys
+                    ml_ok = bundle
                         .mldsa()
-                        .verify(signing_input.as_bytes(), &sig_bytes)
+                        .verify(block.signing_input.as_bytes(), &block.sig_bytes)
                         .is_ok();
                 }
                 _ => return Err(TokenError::AlgMismatch),
@@ -275,52 +304,60 @@ impl<C: Clock> TokenVerifier<C> {
 
         Ok(claims)
     }
+}
 
-    fn parse_sig_block(
-        &self,
-        sig_obj: &serde_json::Value,
-        payload_b64: &str,
-    ) -> Result<(String, String, Vec<u8>), TokenError> {
-        let sig_map = sig_obj.as_object().ok_or(TokenError::InvalidFormat)?;
-        let protected_b64 = sig_map
-            .get("protected")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(TokenError::InvalidFormat)?;
-        let signature_b64 = sig_map
-            .get("signature")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(TokenError::InvalidFormat)?;
+struct ParsedBlock {
+    alg: String,
+    kid: String,
+    signing_input: String,
+    sig_bytes: Vec<u8>,
+}
 
-        let header_bytes = B64.decode(protected_b64).map_err(|_| TokenError::Base64)?;
-        let header: serde_json::Value =
-            serde_json::from_slice(&header_bytes).map_err(|_| TokenError::InvalidFormat)?;
-        let header_map = header.as_object().ok_or(TokenError::InvalidFormat)?;
+fn parse_sig_block(
+    sig_obj: &serde_json::Value,
+    payload_b64: &str,
+) -> Result<ParsedBlock, TokenError> {
+    let sig_map = sig_obj.as_object().ok_or(TokenError::InvalidFormat)?;
+    let protected_b64 = sig_map
+        .get("protected")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(TokenError::InvalidFormat)?;
+    let signature_b64 = sig_map
+        .get("signature")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(TokenError::InvalidFormat)?;
 
-        let alg = header_map
-            .get("alg")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(TokenError::InvalidFormat)?;
-        let typ = header_map
-            .get("typ")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(TokenError::InvalidFormat)?;
-        let kid = header_map
-            .get("kid")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(TokenError::InvalidFormat)?;
+    let header_bytes = B64.decode(protected_b64).map_err(|_| TokenError::Base64)?;
+    let header: serde_json::Value =
+        serde_json::from_slice(&header_bytes).map_err(|_| TokenError::InvalidFormat)?;
+    let header_map = header.as_object().ok_or(TokenError::InvalidFormat)?;
 
-        if typ != "JWT" {
-            return Err(TokenError::InvalidFormat);
-        }
-        if kid != self.keys.kid().as_str() {
-            return Err(TokenError::KidMismatch);
-        }
+    let alg = header_map
+        .get("alg")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(TokenError::InvalidFormat)?;
+    let typ = header_map
+        .get("typ")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(TokenError::InvalidFormat)?;
+    let kid = header_map
+        .get("kid")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(TokenError::InvalidFormat)?;
 
-        let signing_input = format!("{protected_b64}.{payload_b64}");
-        let sig_bytes = B64.decode(signature_b64).map_err(|_| TokenError::Base64)?;
-
-        Ok((alg.to_string(), signing_input, sig_bytes))
+    if typ != "JWT" {
+        return Err(TokenError::InvalidFormat);
     }
+
+    let signing_input = format!("{protected_b64}.{payload_b64}");
+    let sig_bytes = B64.decode(signature_b64).map_err(|_| TokenError::Base64)?;
+
+    Ok(ParsedBlock {
+        alg: alg.to_string(),
+        kid: kid.to_string(),
+        signing_input,
+        sig_bytes,
+    })
 }
 
 fn sign_block(
@@ -344,7 +381,7 @@ mod tests {
     use crate::token::claims::{ContextLabel, TOKEN_VERSION};
     use crate::token::clock::FixedClock;
     use crate::token::error::TokenError;
-    use crate::token::keys::SigningKeys;
+    use crate::token::keys::{Keyring, SigningKeys};
     use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
     use base64::Engine;
     use std::sync::Arc;
@@ -652,6 +689,130 @@ mod tests {
             .verify(token.as_str().as_bytes())
             .expect_err("nbf must fail");
         assert!(matches!(err, TokenError::NotYetValid));
+    }
+
+    #[test]
+    fn verify_accepts_token_signed_by_a_retired_bundle() {
+        // The retired keys minted the token; the primary signs new
+        // tokens. A keyring containing both must accept the retired
+        // token by looking it up via its kid.
+        let retired_keys = Arc::new(SigningKeys::generate_ephemeral().expect("retired"));
+        let primary_keys = Arc::new(SigningKeys::generate_ephemeral().expect("primary"));
+        let retired_issuer = TokenIssuer::new(
+            Arc::clone(&retired_keys),
+            FixedClock::new(FIXED_NOW),
+            ISS,
+            DEFAULT_ACCESS_TTL,
+        );
+        let token = issue(&retired_issuer, ContextLabel::Vivo);
+        let ring = Keyring::new(primary_keys.verifying_keys())
+            .with_retired(vec![retired_keys.verifying_keys()])
+            .expect("distinct kids");
+        let verifier = TokenVerifier::new(ring, FixedClock::new(FIXED_NOW), ISS);
+        let claims = verifier
+            .verify(token.as_str().as_bytes())
+            .expect("retired-kid token must verify");
+        assert_eq!(claims.iss, ISS);
+    }
+
+    #[test]
+    fn verify_rejects_token_whose_kid_is_outside_the_keyring() {
+        // Token minted by an entirely separate signer. Even though the
+        // signatures themselves are valid, the kid is unknown to this
+        // keyring, so the verifier rejects it as KidMismatch.
+        let stranger_keys = Arc::new(SigningKeys::generate_ephemeral().expect("stranger"));
+        let primary_keys = Arc::new(SigningKeys::generate_ephemeral().expect("primary"));
+        let stranger_issuer = TokenIssuer::new(
+            Arc::clone(&stranger_keys),
+            FixedClock::new(FIXED_NOW),
+            ISS,
+            DEFAULT_ACCESS_TTL,
+        );
+        let token = issue(&stranger_issuer, ContextLabel::Vivo);
+        let verifier = TokenVerifier::new(
+            primary_keys.verifying_keys(),
+            FixedClock::new(FIXED_NOW),
+            ISS,
+        );
+        let err = verifier
+            .verify(token.as_str().as_bytes())
+            .expect_err("unknown kid must fail");
+        assert!(matches!(err, TokenError::KidMismatch));
+    }
+
+    #[test]
+    fn verify_rejects_token_whose_two_signatures_carry_different_kids() {
+        // Forge a token where the EdDSA block's protected header carries
+        // a kid from the primary bundle while the ML-DSA-65 block's
+        // header is from the retired bundle. The verifier must refuse
+        // to accept "split" tokens — the kid identifies the hybrid
+        // pair, both halves must agree.
+        let primary_keys = Arc::new(SigningKeys::generate_ephemeral().expect("primary"));
+        let retired_keys = Arc::new(SigningKeys::generate_ephemeral().expect("retired"));
+
+        let primary_issuer = TokenIssuer::new(
+            Arc::clone(&primary_keys),
+            FixedClock::new(FIXED_NOW),
+            ISS,
+            DEFAULT_ACCESS_TTL,
+        );
+        let retired_issuer = TokenIssuer::new(
+            Arc::clone(&retired_keys),
+            FixedClock::new(FIXED_NOW),
+            ISS,
+            DEFAULT_ACCESS_TTL,
+        );
+
+        // Issue two tokens with the same payload by giving them the
+        // same fixed clock + issuer so iat/nbf/exp coincide. jti will
+        // differ — that's fine, we only need the protected headers to
+        // come from different kids while the wire shape is otherwise
+        // valid.
+        let primary_tok = issue(&primary_issuer, ContextLabel::Vivo);
+        let retired_tok = issue(&retired_issuer, ContextLabel::Vivo);
+
+        let mut primary_doc: serde_json::Value =
+            serde_json::from_str(primary_tok.as_str()).expect("parse");
+        let retired_doc: serde_json::Value =
+            serde_json::from_str(retired_tok.as_str()).expect("parse");
+
+        // Splice the retired token's ML-DSA-65 block into the primary
+        // token. The result has two valid-looking signature blocks
+        // with mismatched kids, signing different signing inputs.
+        let retired_sigs = retired_doc["signatures"].as_array().expect("sigs");
+        let retired_ml = retired_sigs
+            .iter()
+            .find(|s| {
+                let h = B64
+                    .decode(s["protected"].as_str().expect("p"))
+                    .expect("b64");
+                let hj: serde_json::Value = serde_json::from_slice(&h).expect("parse");
+                hj["alg"] == "ML-DSA-65"
+            })
+            .expect("ml block")
+            .clone();
+        let primary_sigs = primary_doc["signatures"].as_array_mut().expect("sigs");
+        let ml_idx = primary_sigs
+            .iter()
+            .position(|s| {
+                let h = B64
+                    .decode(s["protected"].as_str().expect("p"))
+                    .expect("b64");
+                let hj: serde_json::Value = serde_json::from_slice(&h).expect("parse");
+                hj["alg"] == "ML-DSA-65"
+            })
+            .expect("primary ml idx");
+        primary_sigs[ml_idx] = retired_ml;
+        let forged = Jwt(serde_json::to_string(&primary_doc).expect("serialize"));
+
+        let ring = Keyring::new(primary_keys.verifying_keys())
+            .with_retired(vec![retired_keys.verifying_keys()])
+            .expect("distinct");
+        let verifier = TokenVerifier::new(ring, FixedClock::new(FIXED_NOW), ISS);
+        let err = verifier
+            .verify(forged.as_str().as_bytes())
+            .expect_err("split-kid token must fail");
+        assert!(matches!(err, TokenError::KidMismatch));
     }
 
     #[test]
