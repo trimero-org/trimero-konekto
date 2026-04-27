@@ -9,6 +9,8 @@
 //! - `GET  /dev/me`        — read the first-party session.
 //! - `POST /dev/logout`    — drop the first-party session and revoke
 //!   any linked refresh family.
+//! - `GET  /.well-known/jwks.json` — publish the hybrid verifier
+//!   bundle for out-of-process validation (ADR-0008).
 //! - `GET  /vivo/whoami`   — echo authenticated Vivo identity.
 //! - `GET  /laboro/whoami` — echo authenticated Laboro identity.
 //! - `GET  /socio/whoami`  — echo authenticated Socio identity.
@@ -48,6 +50,8 @@ use konekto_db::session::SessionStore;
 ///   opaque 401 before the handler body runs.
 /// - `/dev/login` writes a `konekto_session` cookie; `/dev/me` and
 ///   `/dev/logout` consume it.
+/// - `/.well-known/jwks.json` is unauthenticated and publicly
+///   cacheable — see ADR-0008 §4.
 pub fn build_router<S: ApiStore, Sess: SessionStore, K: Clock>(
     state: AppState<S, Sess, K>,
 ) -> Router {
@@ -57,6 +61,7 @@ pub fn build_router<S: ApiStore, Sess: SessionStore, K: Clock>(
         .route("/dev/refresh", post(handlers::refresh::<S, Sess, K>))
         .route("/dev/me", get(handlers::me))
         .route("/dev/logout", post(handlers::logout::<S, Sess, K>))
+        .route("/.well-known/jwks.json", get(handlers::jwks::<S, Sess, K>))
         .route("/vivo/whoami", get(handlers::whoami_vivo))
         .route("/laboro/whoami", get(handlers::whoami_laboro))
         .route("/socio/whoami", get(handlers::whoami_socio))
@@ -928,6 +933,135 @@ mod tests {
             .await
             .expect("refresh after logout");
         assert_eq!(refresh_resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ---- Phase C: JWKS publication ----
+
+    #[tokio::test]
+    async fn jwks_endpoint_returns_jwk_set_with_two_keys() {
+        let app = build_router(test_state());
+        let resp = app
+            .oneshot(get_request("/.well-known/jwks.json", None))
+            .await
+            .expect("jwks");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        let arr = body["keys"].as_array().expect("keys array");
+        assert_eq!(arr.len(), 2);
+        // Algorithms covered exactly once each.
+        let mut algs: Vec<String> = arr
+            .iter()
+            .map(|j| j["alg"].as_str().expect("alg").to_string())
+            .collect();
+        algs.sort();
+        assert_eq!(algs, vec!["EdDSA".to_string(), "ML-DSA-65".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn jwks_endpoint_sets_documented_response_headers() {
+        let app = build_router(test_state());
+        let resp = app
+            .oneshot(get_request("/.well-known/jwks.json", None))
+            .await
+            .expect("jwks");
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .expect("content-type"),
+            "application/jwk-set+json",
+        );
+        let cache = resp
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .expect("cache-control")
+            .to_str()
+            .expect("ascii");
+        assert!(cache.contains("public"));
+        assert!(cache.contains("max-age=300"));
+    }
+
+    #[tokio::test]
+    async fn jwks_published_kid_matches_active_token_kid() {
+        // The kid stamped into a freshly issued token must match the
+        // kid published in JWKS — otherwise an RP fetching JWKS could
+        // never select the right key for verification.
+        let app = build_router(test_state());
+        let (_id, token, _r, _c) = enroll_then_login(&app, "vivo").await;
+        let token_v: Value = serde_json::from_str(&token).expect("token json");
+        let header_b64 = token_v["signatures"][0]["protected"]
+            .as_str()
+            .expect("protected");
+        let header_bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            header_b64,
+        )
+        .expect("b64");
+        let header: Value = serde_json::from_slice(&header_bytes).expect("json");
+        let token_kid = header["kid"].as_str().expect("kid").to_string();
+
+        let jwks_resp = app
+            .oneshot(get_request("/.well-known/jwks.json", None))
+            .await
+            .expect("jwks");
+        let set = body_json(jwks_resp).await;
+        for jwk in set["keys"].as_array().expect("keys") {
+            assert_eq!(jwk["kid"].as_str().expect("kid"), token_kid);
+        }
+    }
+
+    #[tokio::test]
+    async fn published_ed25519_jwk_verifies_a_real_token_signature() {
+        // End-to-end: the bytes published at /jwks endpoint *do* verify
+        // the EdDSA signature carried by a freshly issued token. If
+        // this test passes, an external RP holding nothing but
+        // /.well-known/jwks.json can validate the classical leg.
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+        use base64::Engine;
+        use konekto_core::token::sign_ed25519::{Ed25519Verifier, ED25519_PUBKEY_LEN};
+
+        let app = build_router(test_state());
+        let (_id, token, _r, _c) = enroll_then_login(&app, "vivo").await;
+
+        let jwks_resp = app
+            .clone()
+            .oneshot(get_request("/.well-known/jwks.json", None))
+            .await
+            .expect("jwks");
+        let set = body_json(jwks_resp).await;
+        let ed_jwk = set["keys"]
+            .as_array()
+            .expect("keys")
+            .iter()
+            .find(|j| j["alg"] == "EdDSA")
+            .expect("ed25519 jwk");
+        let x_b64 = ed_jwk["x"].as_str().expect("x");
+        let pk_bytes = B64.decode(x_b64).expect("b64 x");
+        assert_eq!(pk_bytes.len(), ED25519_PUBKEY_LEN);
+        let mut pk = [0u8; ED25519_PUBKEY_LEN];
+        pk.copy_from_slice(&pk_bytes);
+        let verifier = Ed25519Verifier::from_public_key(pk);
+
+        // Pull the EdDSA signing-input + signature out of the token.
+        let token_v: Value = serde_json::from_str(&token).expect("token json");
+        let payload_b64 = token_v["payload"].as_str().expect("payload");
+        let sigs = token_v["signatures"].as_array().expect("sigs");
+        let ed_block = sigs
+            .iter()
+            .find(|s| {
+                let header_b64 = s["protected"].as_str().expect("p");
+                let header_bytes = B64.decode(header_b64).expect("b64");
+                let header: Value = serde_json::from_slice(&header_bytes).expect("json");
+                header["alg"] == "EdDSA"
+            })
+            .expect("ed block");
+        let ed_protected_b64 = ed_block["protected"].as_str().expect("protected");
+        let ed_sig_b64 = ed_block["signature"].as_str().expect("signature");
+        let signing_input = format!("{ed_protected_b64}.{payload_b64}");
+        let sig = B64.decode(ed_sig_b64).expect("b64 sig");
+
+        verifier
+            .verify(signing_input.as_bytes(), &sig)
+            .expect("published Ed25519 jwk must verify the token's EdDSA signature");
     }
 
     #[tokio::test]

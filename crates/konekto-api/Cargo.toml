@@ -46,3 +46,4 @@ sqlx = { version = "0.8", default-features = false, features = [
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 bytes = "1"
+base64 = "0.22"
