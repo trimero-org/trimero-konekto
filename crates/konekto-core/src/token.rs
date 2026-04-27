@@ -21,6 +21,7 @@
 pub mod claims;
 pub mod clock;
 pub mod error;
+pub mod jwks;
 pub mod jws;
 pub mod keys;
 pub mod session;
@@ -30,6 +31,7 @@ pub mod sign_mldsa;
 pub use claims::{Claims, ContextLabel, TOKEN_VERSION};
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use error::TokenError;
+pub use jwks::to_jwk_set;
 pub use jws::{Jwt, TokenIssuer, TokenVerifier, DEFAULT_ACCESS_TTL, DEFAULT_CLOCK_LEEWAY};
 pub use keys::{Kid, SigningKeys, VerifyingKeys, ENV_ED25519_SK, ENV_MLDSA_SK};
 pub use session::{

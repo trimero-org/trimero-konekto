@@ -179,6 +179,16 @@ impl<C: Clock> TokenVerifier<C> {
         &self.clock
     }
 
+    /// Borrow the verifier's [`VerifyingKeys`] bundle.
+    ///
+    /// Exposed so the JWKS publication path can read the public-key
+    /// bytes without re-routing them through `AppState`. Verifying keys
+    /// carry no secret material — only public bytes and the shared
+    /// [`super::keys::Kid`].
+    pub fn verifying_keys(&self) -> &VerifyingKeys {
+        &self.keys
+    }
+
     /// Verify a serialized JWS.
     ///
     /// On success, returns the decoded [`Claims`]. On failure, returns

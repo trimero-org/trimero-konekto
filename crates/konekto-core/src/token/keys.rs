@@ -164,6 +164,27 @@ impl VerifyingKeys {
         &self.kid
     }
 
+    /// Borrow the raw Ed25519 public-key bytes (32 bytes).
+    ///
+    /// Exposed so the JWKS publication path
+    /// ([`crate::token::jwks::to_jwk_set`]) can encode the `x` field of
+    /// the JWK without leaking the rest of the verifier surface.
+    #[must_use]
+    pub fn ed25519_public_key(&self) -> &[u8; ED25519_PUBKEY_LEN] {
+        self.ed25519.public_key()
+    }
+
+    /// Encoded ML-DSA-65 verifying key (1952 bytes).
+    ///
+    /// Exposed for the same JWKS publication reason as
+    /// [`Self::ed25519_public_key`]. Returns an owned `Vec<u8>` because
+    /// the underlying crate stores the verifying key in its native
+    /// algebraic form, not as a contiguous byte slice.
+    #[must_use]
+    pub fn mldsa_public_key(&self) -> Vec<u8> {
+        self.mldsa.verifying_key_bytes()
+    }
+
     pub(crate) fn ed25519(&self) -> &Ed25519Verifier {
         &self.ed25519
     }
