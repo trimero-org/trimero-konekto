@@ -398,16 +398,19 @@ fn whoami_response<C: Context>(ctx: AuthedContext<C>, context_str: &'static str)
 
 /// Handler for `GET /.well-known/jwks.json`.
 ///
-/// Publishes the verifier's hybrid key bundle so any relying party can
-/// validate Konekto access tokens out-of-process. ADR-0008 §1 fixes
-/// the shape (one JWK per algorithm, both sharing the same `kid`); §4
-/// fixes the response headers (`application/jwk-set+json` and a
-/// 5-minute public cache, sufficient for the pre-alpha posture where
-/// keys are ephemeral on restart).
+/// Publishes every bundle in the verifier's keyring (primary plus any
+/// retired bundles) so any relying party can validate Konekto access
+/// tokens out-of-process — including tokens minted under a recently
+/// retired primary. ADR-0008 §1 fixes the shape (one JWK per algorithm,
+/// both sharing the same `kid`); ADR-0009 §5 extends that to publish
+/// the union of every bundle in the keyring. §4 fixes the response
+/// headers (`application/jwk-set+json` and a 5-minute public cache,
+/// sufficient for the pre-alpha posture where keys are ephemeral on
+/// restart).
 pub async fn jwks<S: ApiStore, Sess: SessionStore, K: Clock>(
     State(state): State<AppState<S, Sess, K>>,
 ) -> Response {
-    let set = konekto_core::token::to_jwk_set(state.verifier.verifying_keys());
+    let set = konekto_core::token::to_jwk_set_from_keyring(state.verifier.keyring());
     let bytes = serde_json::to_vec(&set).expect("jwk set serializes");
     let mut response = Response::new(axum::body::Body::from(bytes));
     response.headers_mut().insert(

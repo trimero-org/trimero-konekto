@@ -23,6 +23,11 @@
 //!   across restarts (so existing tokens keep verifying); omit both
 //!   and a fresh keypair is drawn at boot with a loud warning.
 //!   Mixing one present and one missing is treated as "both missing".
+//! - `TOKEN_RETIRED_VERIFIERS` — optional. Comma-separated list of
+//!   `<ed25519_pk_b64>:<mldsa_pk_b64>` pairs (each base64url-encoded,
+//!   no padding). Bundles in this list keep verifying access tokens
+//!   minted by a previous primary signer, but never sign new tokens.
+//!   See ADR-0009 §4 for the rotation playbook.
 //! - `KONEKTO_ISSUER` — optional. String used as the `iss` claim.
 //!   Default `konekto-dev`.
 //! - `KONEKTO_COOKIE_SECURE` — optional. `"true"` (default) emits the
@@ -34,10 +39,12 @@ use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+use base64::Engine;
 use konekto_api::{build_router, AppState, CookieConfig};
 use konekto_core::token::{
-    SigningKeys, SystemClock, TokenIssuer, TokenVerifier, DEFAULT_ACCESS_TTL, ENV_ED25519_SK,
-    ENV_MLDSA_SK,
+    Keyring, SigningKeys, SystemClock, TokenIssuer, TokenVerifier, VerifyingKeys,
+    DEFAULT_ACCESS_TTL, ENV_ED25519_SK, ENV_MLDSA_SK, ENV_RETIRED_VERIFIERS,
 };
 use konekto_db::pg::PgIdentityStore;
 use konekto_db::session::InMemorySessionStore;
@@ -71,8 +78,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("migrations applied");
 
     let signing_keys = Arc::new(load_signing_keys()?);
-    let verifying_keys = signing_keys.verifying_keys();
+    let primary_verifier = signing_keys.verifying_keys();
     tracing::info!(kid = %signing_keys.kid().as_str(), "token signing keys loaded");
+
+    let retired = load_retired_verifiers()?;
+    let retired_count = retired.len();
+    let keyring = Keyring::new(primary_verifier).with_retired(retired)?;
+    if retired_count > 0 {
+        tracing::info!(
+            retired_count,
+            "retired verifier bundles loaded (verify-only)"
+        );
+    }
 
     let issuer = Arc::new(TokenIssuer::new(
         Arc::clone(&signing_keys),
@@ -80,11 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         issuer_claim.clone(),
         DEFAULT_ACCESS_TTL,
     ));
-    let verifier = Arc::new(TokenVerifier::new(
-        verifying_keys,
-        SystemClock,
-        issuer_claim,
-    ));
+    let verifier = Arc::new(TokenVerifier::new(keyring, SystemClock, issuer_claim));
 
     let sessions = InMemorySessionStore::new();
     tracing::warn!(
@@ -120,6 +133,36 @@ fn load_cookie_config() -> Result<CookieConfig, Box<dyn std::error::Error>> {
             Err(format!("{ENV_COOKIE_SECURE} must be `true` or `false`, got {other:?}").into())
         }
     }
+}
+
+fn load_retired_verifiers() -> Result<Vec<VerifyingKeys>, Box<dyn std::error::Error>> {
+    let Ok(raw) = env::var(ENV_RETIRED_VERIFIERS) else {
+        return Ok(Vec::new());
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut bundles = Vec::new();
+    for (idx, entry) in trimmed.split(',').enumerate() {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return Err(
+                format!("{ENV_RETIRED_VERIFIERS} entry {idx} is empty (stray comma?)").into(),
+            );
+        }
+        let (ed_b64, ml_b64) = entry.split_once(':').ok_or_else(|| {
+            format!("{ENV_RETIRED_VERIFIERS} entry {idx} must be `<ed25519_pk_b64>:<mldsa_pk_b64>`")
+        })?;
+        let ed_bytes = B64.decode(ed_b64.trim()).map_err(|e| {
+            format!("{ENV_RETIRED_VERIFIERS} entry {idx} ed25519 not base64url: {e}")
+        })?;
+        let ml_bytes = B64.decode(ml_b64.trim()).map_err(|e| {
+            format!("{ENV_RETIRED_VERIFIERS} entry {idx} ml-dsa not base64url: {e}")
+        })?;
+        bundles.push(VerifyingKeys::from_public_bytes(&ed_bytes, &ml_bytes)?);
+    }
+    Ok(bundles)
 }
 
 fn load_signing_keys() -> Result<SigningKeys, Box<dyn std::error::Error>> {
