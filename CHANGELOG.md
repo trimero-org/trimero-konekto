@@ -283,6 +283,56 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   invariant, the response-header set, the verifier-as-source-of-truth
   posture, and the rotation / OIDC discovery / signed-JWKS deferrals.
 
+- `konekto-core`: static keyring rotation (ADR-0009).
+  - `token::Keyring` — one primary `VerifyingKeys` bundle plus zero
+    or more retired bundles, all carrying distinct `kid`s. Built via
+    `Keyring::new(primary).with_retired(vec)`; `kid` collisions
+    (primary vs retired, or retired vs retired) fail at construction
+    with `TokenError::EnvConfig`.
+  - `Keyring::find(&kid) -> Option<&VerifyingKeys>` looks up a bundle
+    by `kid`; `Keyring::all()` iterates primary-first.
+  - `VerifyingKeys::from_public_bytes(ed25519_pk: &[u8], mldsa_pk:
+    &[u8])` reconstructs a verify-only bundle from raw public-key
+    bytes (no signing seed needed). Used to load retired entries
+    whose secrets the operator has dropped.
+  - `token::to_jwk_set_from_keyring(&Keyring) -> serde_json::Value`
+    publishes every bundle in the keyring (two JWKs per bundle,
+    primary first). The single-bundle `to_jwk_set` helper is
+    preserved for the tests that exercise per-bundle JWK shape.
+  - `TokenVerifier` now holds a `Keyring` instead of a single
+    `VerifyingKeys`. Verification parses the `kid` from each
+    signature block, requires both blocks to share the same `kid`,
+    looks the bundle up via `Keyring::find`, and verifies each leg
+    against that bundle. Tokens minted under a retired `kid` keep
+    verifying for their remaining TTL; unknown `kid`s and split-kid
+    tokens fail as `TokenError::KidMismatch`.
+  - `TokenVerifier::new` / `with_leeway` accept `impl Into<Keyring>`,
+    so existing call sites passing a `VerifyingKeys` keep compiling
+    via the blanket `From<VerifyingKeys> for Keyring`.
+  - `TokenVerifier::verifying_keys() -> &VerifyingKeys` is replaced
+    by `TokenVerifier::keyring() -> &Keyring` — the JWKS path needs
+    the full keyring, and carrying both accessors would invite
+    future code to silently miss retired tokens.
+- `konekto-api`: `TOKEN_RETIRED_VERIFIERS` env var.
+  - Comma-separated list of `<ed25519_pk_b64>:<mldsa_pk_b64>` entries
+    (each base64url, no padding). Bundles in this list keep verifying
+    access tokens minted by a previous primary signer; they never
+    sign new tokens. Boot fails on parse errors, wrong byte lengths,
+    empty entries, or `kid` collisions.
+  - The `/.well-known/jwks.json` handler switches to
+    `to_jwk_set_from_keyring` and publishes the union of every
+    bundle in the verifier's keyring. RPs that fetched JWKS during a
+    rotation window see both old and new `kid`s within the
+    `Cache-Control: public, max-age=300` lifetime.
+  - Boot-time `tracing::info!` logs the count of retired bundles
+    when ≥1, alongside the existing primary-`kid` info-line.
+- `docs/adr/0009-static-key-rotation.md`: records the two-set keyring
+  model, the public-keys-only retired-bundle posture, the env-var
+  shape, the verifier's lookup-by-`kid` invariant, the JWKS
+  union-publication shape, the three-deploy operator playbook
+  (introduce → wait → drop), and the dynamic-rotation / signed-JWKS
+  / scheduling deferrals.
+
 ### Changed
 - `konekto-api`: `POST /dev/login` response body is extended with
   `access_token`, `token_type`, `expires_in`, and (Phase B)
