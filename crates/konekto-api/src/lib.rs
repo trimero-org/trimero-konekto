@@ -11,6 +11,9 @@
 //!   any linked refresh family.
 //! - `GET  /.well-known/jwks.json` — publish the hybrid verifier
 //!   bundle for out-of-process validation (ADR-0008).
+//! - `GET  /healthz`       — liveness probe (always 200, no I/O).
+//! - `GET  /readyz`        — readiness probe (200 if the identity
+//!   store is reachable, 503 otherwise).
 //! - `GET  /vivo/whoami`   — echo authenticated Vivo identity.
 //! - `GET  /laboro/whoami` — echo authenticated Laboro identity.
 //! - `GET  /socio/whoami`  — echo authenticated Socio identity.
@@ -62,6 +65,8 @@ pub fn build_router<S: ApiStore, Sess: SessionStore, K: Clock>(
         .route("/dev/me", get(handlers::me))
         .route("/dev/logout", post(handlers::logout::<S, Sess, K>))
         .route("/.well-known/jwks.json", get(handlers::jwks::<S, Sess, K>))
+        .route("/healthz", get(handlers::healthz))
+        .route("/readyz", get(handlers::readyz::<S, Sess, K>))
         .route("/vivo/whoami", get(handlers::whoami_vivo))
         .route("/laboro/whoami", get(handlers::whoami_laboro))
         .route("/socio/whoami", get(handlers::whoami_socio))
@@ -154,6 +159,10 @@ mod tests {
 
         async fn record_audit_event(&mut self, record: &AuditRecord) -> Result<(), DbError> {
             self.inner.lock().await.record_audit_event(record).await
+        }
+
+        async fn health_check(&self) -> Result<(), DbError> {
+            self.inner.lock().await.health_check().await
         }
     }
 
@@ -1091,5 +1100,32 @@ mod tests {
             .await
             .expect("logout forged");
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_200_with_status_ok() {
+        // Liveness must never depend on backing-store reachability — a
+        // healthy process answers 200 even mid-failover so the
+        // orchestrator does not kill it while readiness drains traffic.
+        let app = build_router(test_state());
+        let resp = app
+            .oneshot(get_request("/healthz", None))
+            .await
+            .expect("healthz");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn readyz_returns_200_when_store_is_reachable() {
+        let app = build_router(test_state());
+        let resp = app
+            .oneshot(get_request("/readyz", None))
+            .await
+            .expect("readyz");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["status"], "ok");
     }
 }

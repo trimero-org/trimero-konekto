@@ -162,6 +162,18 @@ pub struct RefreshResponse {
     pub refresh_token: String,
 }
 
+/// Response body for `GET /healthz` and `GET /readyz`.
+///
+/// The `status` field carries one of two literals: `"ok"` (200) or
+/// `"unready"` (503). The wire shape is intentionally minimal — the
+/// HTTP status code is the load balancer's signal; the body is
+/// just there to confirm the handler ran.
+#[derive(Debug, Serialize)]
+pub struct HealthResponse {
+    /// Operational status of the API instance.
+    pub status: &'static str,
+}
+
 /// Response body for `GET /{ctx}/whoami`.
 #[derive(Debug, Serialize)]
 pub struct WhoamiResponse {
@@ -422,6 +434,43 @@ pub async fn jwks<S: ApiStore, Sess: SessionStore, K: Clock>(
         HeaderValue::from_static("public, max-age=300"),
     );
     response
+}
+
+/// Handler for `GET /healthz` (liveness).
+///
+/// Always returns 200 with `{"status":"ok"}`. The handler does not
+/// touch the database, the session store, or any external resource —
+/// a 200 means only "the process is up and the HTTP listener is
+/// answering". Use this as a Kubernetes liveness probe / Docker
+/// healthcheck shallow signal: a failing `/healthz` should trigger a
+/// process restart, not a backend rotation.
+pub async fn healthz() -> Json<HealthResponse> {
+    Json(HealthResponse { status: "ok" })
+}
+
+/// Handler for `GET /readyz` (readiness).
+///
+/// Returns 200 with `{"status":"ok"}` when the identity store is
+/// reachable, 503 with `{"status":"unready"}` when it is not. Use
+/// this as the Kubernetes readiness probe / load-balancer gate: a
+/// failing `/readyz` should pull the instance out of rotation
+/// without restarting it (the process is alive but cannot serve
+/// traffic). The session store is in-process today (ADR-0007 defers
+/// Redis), so we don't probe it.
+pub async fn readyz<S: ApiStore, Sess: SessionStore, K: Clock>(
+    State(state): State<AppState<S, Sess, K>>,
+) -> Response {
+    match state.store.health_check().await {
+        Ok(()) => (StatusCode::OK, Json(HealthResponse { status: "ok" })).into_response(),
+        Err(err) => {
+            tracing::warn!(?err, "readyz: identity store unhealthy");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(HealthResponse { status: "unready" }),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// Handler for `GET /vivo/whoami`.

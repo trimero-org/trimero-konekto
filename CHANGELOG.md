@@ -332,6 +332,22 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   union-publication shape, the three-deploy operator playbook
   (introduce → wait → drop), and the dynamic-rotation / signed-JWKS
   / scheduling deferrals.
+- `konekto-db`: `IdentityStore::health_check` — backend-reachability
+  probe used by the API readiness endpoint. `InMemoryStore` returns
+  `Ok(())` unconditionally; `PgIdentityStore` issues `SELECT 1`
+  against the pool so the probe surfaces failover, exhaustion, or
+  authentication-state failures.
+- `konekto-api`: liveness and readiness endpoints.
+  - `GET /healthz`: process liveness probe. Returns `200`
+    `{"status":"ok"}` without touching any backing store, so an
+    orchestrator never kills the process during a transient
+    database outage.
+  - `GET /readyz`: readiness probe. Returns `200`
+    `{"status":"ok"}` when `IdentityStore::health_check` succeeds,
+    `503` `{"status":"unready"}` (with a `tracing::warn!` carrying
+    the underlying error) otherwise. Lets a load balancer or
+    orchestrator drain traffic from an instance whose database is
+    unreachable while keeping the process alive.
 
 ### Changed
 - `konekto-api`: `POST /dev/login` response body is extended with

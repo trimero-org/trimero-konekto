@@ -334,6 +334,14 @@ impl IdentityStore for PgIdentityStore {
         .map_err(write_err)?;
         Ok(())
     }
+
+    async fn health_check(&self) -> Result<(), DbError> {
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
+            .await
+            .map_err(read_err)?;
+        Ok(())
+    }
 }
 
 // --- AuditLog (cross-context grants) -----------------------------------
@@ -635,5 +643,15 @@ mod tests {
         store.create_identity(&rec).await.expect("first insert");
         let second = store.create_identity(&rec).await;
         assert!(matches!(second, Err(crate::DbError::Conflict)));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker"]
+    async fn health_check_succeeds_against_live_postgres() {
+        let (pool, _guard) = fresh_postgres().await;
+        let store = PgIdentityStore::new(pool);
+        // Probe must succeed even before `migrate()` runs — it exercises
+        // pool reachability, not schema state.
+        store.health_check().await.expect("health check");
     }
 }

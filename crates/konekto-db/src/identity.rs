@@ -77,6 +77,19 @@ pub trait IdentityStore: Send {
 
     /// Append an audit event.
     async fn record_audit_event(&mut self, record: &AuditRecord) -> Result<(), DbError>;
+
+    /// Liveness/readiness probe.
+    ///
+    /// Implementations are expected to be cheap — typically a single
+    /// round-trip to the backing database (`SELECT 1` on Postgres) or
+    /// a no-op for in-memory backends. Used by the HTTP layer's
+    /// `/readyz` handler to gate traffic during deployment.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`DbError`] when the backend is
+    /// unreachable, mid-failover, or otherwise unable to serve queries.
+    async fn health_check(&self) -> Result<(), DbError>;
 }
 
 /// Process-local store combining identities, credentials, wrapped
@@ -170,6 +183,10 @@ impl IdentityStore for InMemoryStore {
 
     async fn record_audit_event(&mut self, record: &AuditRecord) -> Result<(), DbError> {
         self.audit_events.push(record.clone());
+        Ok(())
+    }
+
+    async fn health_check(&self) -> Result<(), DbError> {
         Ok(())
     }
 }
